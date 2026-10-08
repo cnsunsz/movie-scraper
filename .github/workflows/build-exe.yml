@@ -1,0 +1,33 @@
+name: Build Windows exe
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [master]
+
+permissions:
+  contents: write
+
+jobs:
+  exe:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install
+        run: py -3 -m pip install -r requirements.txt pyinstaller
+      - name: Build one file
+        run: py -3 -m PyInstaller --noconsole --onefile --name MovieScraper app.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MovieScraper
+          path: dist/MovieScraper.exe
+      - name: Publish to the latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest dist/MovieScraper.exe --title "最新 Windows 单文件" --notes "master 每次更新都会重新编译这个 exe。" --latest
