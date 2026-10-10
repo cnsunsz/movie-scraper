@@ -25,7 +25,7 @@
 
 ## 一般影片 / 其他影片
 
-「本地配置」顶部可切换 **一般影片** 与 **其他影片**（`film_type`: `general` | `other`）。两类各自保存网站顺序、命名规则、翻译与排除等；刮削源目录、输出目录、代理、TMDB Key 共用。旧版扁平 `config.json` 会迁移进「其他影片」，并自动生成「一般影片」默认项。
+「本地配置」顶部可切换 **一般影片** 与 **其他影片**（`film_type`: `general` | `other`）。两类各自保存网站顺序、命名规则、翻译与排除等；刮削源目录、输出目录、代理、TMDB Key 共用。若加载旧版扁平配置，会迁移进「其他影片」，并自动生成「一般影片」默认项。
 
 - **一般影片** 默认网站：TMDB、IMDb 开，Jav* 关；文件夹规则 `genres+'/'+title`，文件命名 `title.year`。
 - **其他影片** 默认网站：JavDB、JavBus、TMDB、IMDb 开；DMM、AVSOX、MGStage、FC2 关；文件夹 `actor+'/'+number`，文件 `number+'-'+title`。
@@ -57,7 +57,7 @@ py -m pip install -r requirements.txt
 py app.py
 ```
 
-命令行：`python3 app.py --cli --media 目录`。`--web` 不是主界面。
+命令行：`python3 app.py --cli --media 目录`。
 
 ```bash
 python3 -m unittest discover -s tests

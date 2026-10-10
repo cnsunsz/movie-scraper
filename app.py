@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """电影元数据刮削：桌面窗口（PySide6），以及可选命令行。
 
-默认 ``python3 app.py`` 打开窗口。``--web`` 才启动浏览器页面。
+默认 ``python3 app.py`` 打开桌面窗口。
 
 配置：默认只用内存默认值，不会在 exe 旁自动生成 config.json。
 用户通过「加载配置 / 保存 / 另存为」显式读写；CLI 可用 ``--config``。
@@ -600,11 +600,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="使用命令行，不打开窗口",
     )
     parser.add_argument(
-        "--web",
-        action="store_true",
-        help="改用本机网页（默认是桌面窗口）",
-    )
-    parser.add_argument(
         "--config",
         default=None,
         help="配置文件路径（仅读写该文件；不指定则用内存默认，不写盘）",
@@ -774,7 +769,6 @@ def main(argv: list[str] | None = None) -> int:
     if env_config and "--config" not in argv and not any(a.startswith("--config=") for a in argv):
         argv = ["--config", env_config, *argv]
     wants_help = "--help" in argv or "-h" in argv
-    wants_web = "--web" in argv
     wants_cli = "--cli" in argv or any(
         arg.startswith("--media")
         or arg.startswith("--output")
@@ -805,11 +799,8 @@ def main(argv: list[str] | None = None) -> int:
             load_config_from(config_arg)
         except OSError:
             set_config_path(Path(config_arg).expanduser().resolve())
-    if wants_web and not wants_cli and not wants_help:
-        from webui import serve
-        return serve()
     if wants_cli or wants_help:
-        cleaned = [arg for arg in argv if arg not in {"--cli", "--web"}]
+        cleaned = [arg for arg in argv if arg != "--cli"]
         return cli(cleaned)
     try:
         from ui import launch
