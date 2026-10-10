@@ -48,7 +48,7 @@ PAGE = """<!DOCTYPE html>
 <body>
 <main>
   <h1>电影元数据刮削</h1>
-  <p class="note">路径是运行本程序的这台电脑上的目录。只复制，不移动、不删除原视频。按文件名番号 / 标题始终在本地解析。</p>
+  <p class="note">路径是运行本程序的这台电脑上的目录。旁边模式不移动视频；文件夹模式会改名并移动。不删除原视频。按文件名番号 / 标题始终在本地解析。</p>
   <form id="job">
     <label class="row"><span>媒体目录</span>
       <input type="text" name="media_dir" value="__MEDIA__" autocomplete="off" placeholder="/path/to/videos">
@@ -56,10 +56,10 @@ PAGE = """<!DOCTYPE html>
     <div class="modes">
       <strong>输出方式</strong>
       <label><input type="radio" name="output_mode" value="beside" __BESIDE__> 只在视频旁边写 nfo 和封面</label>
-      <label><input type="radio" name="output_mode" value="folder" __FOLDER__> 按《标题 (年份)》建文件夹并复制</label>
+      <label><input type="radio" name="output_mode" value="folder" __FOLDER__> 按演员/番号改名并移动到输出目录</label>
     </div>
     <label class="row" id="output-row"><span>输出目录</span>
-      <input type="text" name="output_dir" value="__OUTPUT__" autocomplete="off" placeholder="仅复制模式需要">
+      <input type="text" name="output_dir" value="__OUTPUT__" autocomplete="off" placeholder="仅移动模式需要">
     </label>
     <div class="sources">
       <label><input type="checkbox" name="imdb" value="1" __IMDB__> IMDb（可选）</label>
@@ -186,7 +186,7 @@ def start_job(fields: dict[str, str]) -> tuple[bool, str, int]:
     if mode not in {"beside", "folder"}:
         return False, "输出方式无效", 400
     if mode == "folder" and not output:
-        return False, "复制模式请填写输出目录", 400
+        return False, "移动模式请填写输出目录", 400
 
     with JOB.lock:
         if JOB.running:
@@ -244,7 +244,15 @@ def render_page() -> str:
         .replace("__OUTPUT__", escape(str(config.get("output_dir") or ""), quote=True))
         .replace("__BESIDE__", "checked" if mode != "folder" else "")
         .replace("__FOLDER__", "checked" if mode == "folder" else "")
-        .replace("__IMDB__", "checked" if config.get("imdb", True) else "")
+        .replace(
+        "__IMDB__",
+        "checked"
+        if next(
+            (item.get("enabled") for item in (config.get("sites") or []) if isinstance(item, dict) and item.get("name") == "imdb"),
+            True,
+        )
+        else "",
+    )
     )
 
 

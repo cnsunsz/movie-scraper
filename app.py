@@ -14,6 +14,27 @@ from pathlib import Path
 from scraper.organize import scrape, scrape_one
 from scraper.sources import normalize_sites
 
+
+def _read_version() -> str:
+    """Read VERSION next to this file, or from the PyInstaller bundle / exe dir."""
+    names = []
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        names.append(Path(meipass) / "VERSION")
+    names.append(Path(__file__).resolve().with_name("VERSION"))
+    if getattr(sys, "frozen", False):
+        names.append(Path(sys.executable).resolve().parent / "VERSION")
+    for candidate in names:
+        try:
+            text = candidate.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if text:
+            return text
+    return "0.0.0"
+
+
+__version__ = _read_version()
 APP_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
 CONFIG_PATH = APP_DIR / "config.json"
 
@@ -184,11 +205,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="改用本机网页（默认是桌面窗口）",
     )
     parser.add_argument("--media", help="媒体目录")
-    parser.add_argument("--output", help="复制模式下的输出目录")
+    parser.add_argument("--output", help="移动模式下的输出目录")
     parser.add_argument(
         "--mode",
         choices=["beside", "folder"],
-        help="beside=只在视频旁边写 nfo 和封面；folder=按《标题 (年份)》建文件夹并复制",
+        help="beside=只在视频旁边写 nfo 和封面；folder=按演员/番号改名并移动到输出目录",
     )
     parser.add_argument(
         "--imdb",
@@ -246,7 +267,7 @@ def cli(argv: list[str]) -> int:
     }
     save_config(settings)
     print(
-        f"模式: {'旁边写 nfo/封面' if mode == 'beside' else '建文件夹并复制'}；"
+        f"模式: {'旁边写 nfo/封面' if mode == 'beside' else '按演员/番号改名并移动'}；"
         f"JavDB: {'开' if use_javdb else '关'}；"
         f"TMDB: {'开' if use_tmdb else '关'}；"
         f"IMDb: {'开' if use_imdb else '关'}"

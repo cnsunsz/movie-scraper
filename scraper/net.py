@@ -29,6 +29,13 @@ def classify_proxy(proxy: str | None) -> tuple[str | None, str | None]:
     if lowered.startswith("socks"):
         return None, "代理是 socks（标准库不能用），本次改为直接连接。请改成 http:// 或 https:// 代理。"
     if not lowered.startswith(("http://", "https://")):
+        # Common "host:port" form from config edits; urllib needs a scheme.
+        if "://" not in text and "/" not in text.split("@")[-1]:
+            text = "http://" + text
+            lowered = text.lower()
+        else:
+            return None, f"无法识别的代理地址（仅支持 http/https）: {text}"
+    if not lowered.startswith(("http://", "https://")):
         return None, f"无法识别的代理地址（仅支持 http/https）: {text}"
     return text, None
 

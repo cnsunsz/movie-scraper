@@ -35,8 +35,23 @@ def _opener(proxy: str | None):
     return urllib.request.build_opener(*handlers)
 
 
+def _normalize_server_base(server_type: str, base: str) -> str:
+    """Strip a trailing ``/emby`` or ``/jellyfin`` so path joining does not double it."""
+
+    root = (base or "").strip().rstrip("/")
+    lowered = root.lower()
+    if server_type == "jellyfin":
+        for suffix in ("/jellyfin", "/emby"):
+            if lowered.endswith(suffix):
+                return root[: -len(suffix)].rstrip("/") or root
+    else:
+        if lowered.endswith("/emby"):
+            return root[:-5].rstrip("/") or root
+    return root
+
+
 def _persons_url(server_type: str, base: str, api_key: str, user_id: str = "", limit: int | None = None) -> str:
-    root = base.rstrip("/")
+    root = _normalize_server_base(server_type, base)
     if server_type == "jellyfin":
         path = f"{root}/Persons"
     else:
@@ -50,7 +65,7 @@ def _persons_url(server_type: str, base: str, api_key: str, user_id: str = "", l
 
 
 def _primary_image_url(server_type: str, base: str, actor_id: str, api_key: str) -> str:
-    root = base.rstrip("/")
+    root = _normalize_server_base(server_type, base)
     if server_type == "jellyfin":
         return f"{root}/Items/{actor_id}/Images/Primary?api_key={urllib.parse.quote(api_key)}"
     return f"{root}/emby/Items/{actor_id}/Images/Primary?api_key={urllib.parse.quote(api_key)}"

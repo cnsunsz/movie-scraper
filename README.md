@@ -56,7 +56,15 @@ py app.py
 python3 -m unittest discover -s tests
 ```
 
-推送到 `master` 后 GitHub Actions 会编译单文件 `MovieScraper.exe` 并更新 `latest` Release。
+推送到 `master` 后 GitHub Actions 会按仓库根目录的 `VERSION` 编译单文件 `MovieScraper.exe`，并发布：
+
+- **版本化 Release**（如 `v0.2.0`）：正式归档，同一版本号不可重复发布；若 tag 已存在，工作流会失败，请先提高 `VERSION`。
+- **`latest` Release**：始终覆盖为当前最新 exe，旧下载链接仍可用。
+
+窗口标题与「语言」页会显示当前版本。下载：
+
+- 最新：https://github.com/cnsunsz/movie-scraper/releases/latest
+- 指定版本：https://github.com/cnsunsz/movie-scraper/releases
 
 ## 会写出哪些文件
 

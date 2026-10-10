@@ -58,7 +58,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app import APP_DIR, effective_proxy, load_config, run_job, run_one_file, save_config
+from app import APP_DIR, __version__, effective_proxy, load_config, run_job, run_one_file, save_config
 from scraper.parser import parse_filename
 from scraper.sources import SITE_LABELS, normalize_sites
 
@@ -243,7 +243,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("电影元数据刮削")
+        self.setWindowTitle(f"电影元数据刮削 v{__version__}")
         self.resize(1080, 760)
         self.setMinimumSize(920, 640)
 
@@ -730,8 +730,9 @@ class MainWindow(QMainWindow):
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(20, 16, 20, 12)
-        card, card_layout = self._card("语言")
+        card, card_layout = self._card("语言 / 关于")
         card_layout.addWidget(QLabel("当前界面：简体中文"))
+        card_layout.addWidget(QLabel(f"版本：MovieScraper v{__version__}"))
         note = QLabel("暂未实现完整多语言切换。界面文案均为简体中文。")
         note.setWordWrap(True)
         note.setStyleSheet("color: #666; border: none;")
@@ -853,7 +854,7 @@ class MainWindow(QMainWindow):
             "2. 点底部绿色「开始」批量刮削；日志在「运行」。\n"
             "3. 「自定义刮削」可只处理一个文件，或测试文件名解析。\n"
             "4. 「演员」可连接 Emby/Jellyfin 并补全缺失头像（Gfriends 或本地库）。\n"
-            "无登录、无到期限制。配置保存在程序旁的 config.json。",
+            f"无登录、无到期限制。配置保存在程序旁的 config.json。\n当前版本：v{__version__}",
         )
 
     def _browse_media(self) -> None:

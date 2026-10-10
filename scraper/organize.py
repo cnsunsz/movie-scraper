@@ -277,7 +277,8 @@ def _process_one(
         if destination.resolve() == src.resolve():
             log(f"输出路径与原文件相同，不移动: {destination}")
         elif destination.exists():
-            log(f"目标已存在，不覆盖、不移动原文件: {destination}")
+            log(f"目标已存在，不覆盖、不移动原文件，跳过写入: {destination}")
+            return used_network
         else:
             folder.mkdir(parents=True, exist_ok=True)
             shutil.move(src, destination)
@@ -456,9 +457,16 @@ def _actor_filename(name: str, url: str, used: set[str]) -> str:
         if path.endswith(candidate):
             ext = ".jpg" if candidate == ".jpeg" else candidate
             break
-    filename = f"{cleaned[:80]}{ext}"
-    if filename in used:
-        return ""
+    base = cleaned[:80]
+    filename = f"{base}{ext}"
+    index = 2
+    while filename in used:
+        suffix = f" ({index})"
+        keep = max(1, 80 - len(suffix))
+        filename = f"{base[:keep]}{suffix}{ext}"
+        index += 1
+        if index > 99:
+            return ""
     used.add(filename)
     return filename
 
