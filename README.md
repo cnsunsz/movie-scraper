@@ -25,7 +25,7 @@
 
 ## 一般影片 / 其他影片
 
-「本地配置」顶部可切换 **一般影片** 与 **其他影片**（`film_type`: `general` | `other`）。两类各自保存网站顺序、命名规则、翻译与排除等；刮削源目录、输出目录、代理、TMDB Key 共用。若加载旧版扁平配置，会迁移进「其他影片」，并自动生成「一般影片」默认项。
+「本地配置」顶部「影片类型」卡片内仅有 **一般影片** / **其他影片** 两个切换按钮（`film_type`: `general` | `other`）。切换时会把当前类型的网站顺序、命名规则、翻译与排除等写入内存配置，并加载另一类型的设置；刮削源目录、输出目录、代理、TMDB Key 共用。若加载旧版扁平配置，会迁移进「其他影片」，并自动生成「一般影片」默认项。
 
 - **一般影片** 默认网站：TMDB、IMDb 开，Jav* 关；文件夹规则 `genres+'/'+title`，文件命名 `title.year`。
 - **其他影片** 默认网站：JavDB、JavBus、TMDB、IMDb 开；DMM、AVSOX、MGStage、FC2 关；文件夹 `actor+'/'+number`，文件 `number+'-'+title`。
@@ -65,7 +65,7 @@ python3 -m unittest discover -s tests
 
 推送到 `master` 后 GitHub Actions 会按仓库根目录的 `VERSION` 编译单文件 `MovieScraper.exe`，并发布：
 
-- **版本化 Release**（如 `v0.4.0`）：正式归档，同一版本号不可重复发布；若 tag 已存在，工作流会失败，请先提高 `VERSION`。
+- **版本化 Release**（如 `v0.4.2`）：正式归档，同一版本号不可重复发布；若 tag 已存在，工作流会失败，请先提高 `VERSION`。
 - **`latest` Release**：始终覆盖为当前最新 exe，旧下载链接仍可用。
 
 窗口标题与「语言」页会显示当前版本。下载：

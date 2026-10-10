@@ -494,15 +494,15 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(20, 16, 20, 16)
         root.setSpacing(16)
 
-        # Film type toggle
+        # Film type toggle — section title is the card title; only two type buttons in the row
         type_card, type_layout = self._card("影片类型")
         type_row = QHBoxLayout()
-        type_row.addWidget(QLabel("刮削配置"))
         self.general_film_btn = QPushButton("一般影片")
         self.other_film_btn = QPushButton("其他影片")
         for btn in (self.general_film_btn, self.other_film_btn):
             btn.setCheckable(True)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setMinimumHeight(34)
         self._film_group = QButtonGroup(self)
         self._film_group.setExclusive(True)
         self._film_group.addButton(self.general_film_btn)
@@ -511,7 +511,9 @@ class MainWindow(QMainWindow):
             self.general_film_btn.setChecked(True)
         else:
             self.other_film_btn.setChecked(True)
+        # Connect BOTH buttons: exclusive group only fires toggled(True) on the newly checked one
         self.general_film_btn.toggled.connect(self._on_film_type_toggled)
+        self.other_film_btn.toggled.connect(self._on_film_type_toggled)
         type_row.addWidget(self.general_film_btn)
         type_row.addWidget(self.other_film_btn)
         type_row.addStretch(1)
@@ -1041,12 +1043,24 @@ class MainWindow(QMainWindow):
         self.other_film_btn.setStyleSheet(on if self.other_film_btn.isChecked() else off)
 
     def _on_film_type_toggled(self, checked: bool) -> None:
+        # Exclusive QButtonGroup: ignore the unchecked sibling; act on the newly checked button.
         if not checked:
             return
-        self._capture_mode_from_ui()
-        self._film_type = "general" if self.general_film_btn.isChecked() else "other"
-        self._apply_mode_to_ui(self._film_type)
-        self._sync_film_type_style()
+        if getattr(self, "_film_type_switching", False):
+            return
+        new_type = "general" if self.general_film_btn.isChecked() else "other"
+        if new_type == self._film_type:
+            self._sync_film_type_style()
+            return
+        self._film_type_switching = True
+        try:
+            # Persist widgets into the mode we are leaving, then load the other profile.
+            self._capture_mode_from_ui()
+            self._film_type = new_type
+            self._apply_mode_to_ui(self._film_type)
+            self._sync_film_type_style()
+        finally:
+            self._film_type_switching = False
 
     def _fill_site_list(self, sites: list[dict]) -> None:
         self.site_list.clear()
@@ -1332,7 +1346,41 @@ class MainWindow(QMainWindow):
         if not self.proxy_enabled.isChecked():
             QMessageBox.information(self, "代理", "当前未启用代理。")
             return
-        QMessageBox.information(self, "代理", f"将使用代理：{self._proxy_url()}\n实际连通性在刮削请求时验证。")
+        import socket
+        from scraper.net import fetch
+
+        proxy = self._proxy_url()
+        host = self.proxy_host.text().strip() or "localhost"
+        try:
+            port = int(self.proxy_port.text().strip() or "1080")
+        except ValueError:
+            QMessageBox.warning(self, "代理", "端口无效。")
+            return
+        try:
+            with socket.create_connection((host, port), timeout=5):
+                pass
+        except OSError as exc:
+            QMessageBox.warning(self, "代理", f"无法连接代理 {host}:{port}\n{exc}")
+            return
+        try:
+            status, _body = fetch(
+                "http://example.com/",
+                proxy=proxy,
+                timeout=10,
+                attempts=1,
+                limit=4096,
+            )
+            QMessageBox.information(
+                self,
+                "代理",
+                f"代理可用：{proxy}\n端口可达，测试请求状态：{status}",
+            )
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                "代理",
+                f"代理端口可达，但经代理访问外网失败：{proxy}\n{exc}",
+            )
 
     def _run_name_test(self) -> None:
         name = self.name_test_edit.text().strip()
