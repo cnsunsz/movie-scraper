@@ -2,6 +2,9 @@
 """电影元数据刮削：桌面窗口（PySide6），以及可选命令行。
 
 默认 ``python3 app.py`` 打开窗口。``--web`` 才启动浏览器页面。
+
+配置：默认只用内存默认值，不会在 exe 旁自动生成 config.json。
+用户通过「加载配置 / 保存 / 另存为」显式读写；CLI 可用 ``--config``。
 """
 
 from __future__ import annotations
@@ -9,7 +12,9 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import os
 import sys
+import tempfile
 from pathlib import Path
 
 from scraper.organize import scrape, scrape_one
@@ -37,12 +42,18 @@ def _read_version() -> str:
 
 __version__ = _read_version()
 APP_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
-CONFIG_PATH = APP_DIR / "config.json"
+
+# Session-only path for the currently loaded/saved config. Never auto-created.
+_config_path: Path | None = None
+
+MAIN_MODES = ("1", "1_keep", "2", "4", "5")
+LINK_MODES = ("move", "soft_link")
 
 SHARED_KEYS = (
     "media_dir",
     "output_dir",
-    "output_mode",
+    "main_mode",
+    "link_mode",
     "tmdb_key",
     "proxy",
     "proxy_enabled",
@@ -69,18 +80,47 @@ MODE_KEYS = (
     "naming_rule",
     "max_title_len",
     "delete_chars",
+    "number_exclude_chars",
     "uppercase_name",
     "image_naming_with_number",
     "jellyfin_mode",
     "actor_photo_kodi",
+    "anonymous_fill",
+    "actor_only_tag",
     "tpdb_token",
     "extrafanart",
     "trailer",
     "storyline",
 )
 
+_BOOL_MODE_KEYS = (
+    "skip_existing_nfo",
+    "translate_plot",
+    "download_images",
+    "download_missing_only",
+    "print_nfo",
+    "uppercase_name",
+    "image_naming_with_number",
+    "jellyfin_mode",
+    "actor_photo_kodi",
+    "anonymous_fill",
+    "actor_only_tag",
+    "extrafanart",
+    "trailer",
+    "storyline",
+)
+
+_STR_MODE_KEYS = (
+    "location_rule",
+    "naming_rule",
+    "delete_chars",
+    "number_exclude_chars",
+    "excluded_folders",
+    "tpdb_token",
+)
+
 GENERAL_MODE_DEFAULTS = {
-    "sites": None,  # filled by default_sites("general")
+    "sites": None,
     "skip_existing_nfo": True,
     "translate_plot": False,
     "download_images": True,
@@ -94,10 +134,13 @@ GENERAL_MODE_DEFAULTS = {
     "naming_rule": "title.year",
     "max_title_len": 80,
     "delete_chars": "",
+    "number_exclude_chars": "",
     "uppercase_name": False,
     "image_naming_with_number": False,
     "jellyfin_mode": False,
     "actor_photo_kodi": False,
+    "anonymous_fill": False,
+    "actor_only_tag": False,
     "tpdb_token": "",
     "extrafanart": True,
     "trailer": False,
@@ -105,7 +148,7 @@ GENERAL_MODE_DEFAULTS = {
 }
 
 OTHER_MODE_DEFAULTS = {
-    "sites": None,  # filled by default_sites("other")
+    "sites": None,
     "skip_existing_nfo": True,
     "translate_plot": True,
     "download_images": True,
@@ -119,10 +162,13 @@ OTHER_MODE_DEFAULTS = {
     "naming_rule": "number+'-'+title",
     "max_title_len": 80,
     "delete_chars": "",
+    "number_exclude_chars": "",
     "uppercase_name": False,
     "image_naming_with_number": False,
     "jellyfin_mode": False,
     "actor_photo_kodi": False,
+    "anonymous_fill": True,
+    "actor_only_tag": False,
     "tpdb_token": "",
     "extrafanart": True,
     "trailer": False,
@@ -132,7 +178,8 @@ OTHER_MODE_DEFAULTS = {
 SHARED_DEFAULTS = {
     "media_dir": "",
     "output_dir": "",
-    "output_mode": "beside",
+    "main_mode": "4",
+    "link_mode": "move",
     "tmdb_key": "",
     "proxy": "",
     "proxy_enabled": False,
@@ -154,6 +201,37 @@ DEFAULTS = {
 }
 
 
+def get_config_path() -> Path | None:
+    """Path of the config file loaded or saved this session, or None."""
+
+    return _config_path
+
+
+def set_config_path(path: Path | str | None) -> Path | None:
+    """Remember the session config path (does not write). ``None`` clears it."""
+
+    global _config_path
+    if path is None or str(path).strip() == "":
+        _config_path = None
+        return None
+    _config_path = Path(path).expanduser().resolve()
+    return _config_path
+
+
+def main_mode_to_output_mode(main_mode: str) -> str:
+    """Map MDC main_mode to legacy beside/folder for callers that still use it."""
+
+    if main_mode in {"1", "1_keep", "2"}:
+        return "folder"
+    return "beside"
+
+
+def output_mode_to_main_mode(output_mode: str) -> str:
+    if output_mode == "folder":
+        return "1"
+    return "4"
+
+
 def _mode_defaults(film_type: str) -> dict:
     base = copy.deepcopy(GENERAL_MODE_DEFAULTS if film_type == "general" else OTHER_MODE_DEFAULTS)
     base["sites"] = default_sites(film_type)
@@ -166,12 +244,10 @@ def _normalize_mode(raw: dict | None, film_type: str) -> dict:
         return data
     if isinstance(raw.get("sites"), list) and raw["sites"]:
         data["sites"] = normalize_sites(raw["sites"], film_type=film_type)
-    for key in ("skip_existing_nfo", "translate_plot", "download_images", "download_missing_only",
-                "print_nfo", "uppercase_name", "image_naming_with_number", "jellyfin_mode",
-                "actor_photo_kodi", "extrafanart", "trailer", "storyline"):
+    for key in _BOOL_MODE_KEYS:
         if isinstance(raw.get(key), bool):
             data[key] = raw[key]
-    for key in ("location_rule", "naming_rule", "delete_chars", "excluded_folders", "tpdb_token"):
+    for key in _STR_MODE_KEYS:
         if isinstance(raw.get(key), str):
             data[key] = raw[key]
     if isinstance(raw.get("sleep_seconds"), (int, float)) and float(raw["sleep_seconds"]) >= 0:
@@ -199,9 +275,20 @@ def _migrate_flat_to_other(raw: dict) -> dict:
         }
         priority = raw.get("priority") if isinstance(raw.get("priority"), str) else None
         mode["sites"] = normalize_sites(None, legacy or None, priority, film_type="other")
-    for key in ("skip_existing_nfo", "translate_plot"):
+    for key in _BOOL_MODE_KEYS:
         if isinstance(raw.get(key), bool):
             mode[key] = raw[key]
+    for key in _STR_MODE_KEYS:
+        if isinstance(raw.get(key), str):
+            mode[key] = raw[key]
+    if isinstance(raw.get("sleep_seconds"), (int, float)) and float(raw["sleep_seconds"]) >= 0:
+        mode["sleep_seconds"] = float(raw["sleep_seconds"])
+    if isinstance(raw.get("nfo_skip_days"), (int, float)) and int(raw["nfo_skip_days"]) >= 0:
+        mode["nfo_skip_days"] = int(raw["nfo_skip_days"])
+    if isinstance(raw.get("excluded_size_mb"), (int, float)) and float(raw["excluded_size_mb"]) >= 0:
+        mode["excluded_size_mb"] = float(raw["excluded_size_mb"])
+    if isinstance(raw.get("max_title_len"), (int, float)) and int(raw["max_title_len"]) > 0:
+        mode["max_title_len"] = int(raw["max_title_len"])
     return mode
 
 
@@ -211,8 +298,15 @@ def _shared_from_raw(raw: dict) -> dict:
         data["media_dir"] = raw["media_dir"]
     if isinstance(raw.get("output_dir"), str):
         data["output_dir"] = raw["output_dir"]
-    if raw.get("output_mode") in {"beside", "folder"}:
-        data["output_mode"] = raw["output_mode"]
+    main_mode = raw.get("main_mode")
+    if isinstance(main_mode, int):
+        main_mode = str(main_mode)
+    if main_mode in MAIN_MODES:
+        data["main_mode"] = main_mode
+    elif raw.get("output_mode") in {"beside", "folder"}:
+        data["main_mode"] = output_mode_to_main_mode(raw["output_mode"])
+    if raw.get("link_mode") in LINK_MODES:
+        data["link_mode"] = raw["link_mode"]
     if isinstance(raw.get("proxy_enabled"), bool):
         data["proxy_enabled"] = raw["proxy_enabled"]
     for key in ("tmdb_key", "proxy", "emby_url", "emby_api_key", "emby_user_id", "actor_local_dir"):
@@ -233,38 +327,80 @@ def _flatten(shared: dict, film_type: str, general: dict, other: dict) -> dict:
         "film_type": film_type,
         "general": copy.deepcopy(general),
         "other": copy.deepcopy(other),
+        # Legacy alias derived from main_mode
+        "output_mode": main_mode_to_output_mode(str(shared.get("main_mode") or "4")),
     }
     return out
 
 
-def load_config() -> dict:
-    shared = dict(SHARED_DEFAULTS)
+def default_config() -> dict:
+    """In-memory defaults; does not touch disk."""
+
+    return _flatten(
+        dict(SHARED_DEFAULTS),
+        "other",
+        _mode_defaults("general"),
+        _mode_defaults("other"),
+    )
+
+
+def parse_config_dict(raw: dict) -> dict:
+    """Validate and normalize a raw dict into the runtime config shape."""
+
+    if not isinstance(raw, dict):
+        return default_config()
+    shared = _shared_from_raw(raw)
     general = _mode_defaults("general")
     other = _mode_defaults("other")
     film_type = "other"
-    try:
-        raw = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return _flatten(shared, film_type, general, other)
-    if not isinstance(raw, dict):
-        return _flatten(shared, film_type, general, other)
-
-    shared = _shared_from_raw(raw)
     has_nested = isinstance(raw.get("general"), dict) or isinstance(raw.get("other"), dict)
     if has_nested:
         if raw.get("film_type") in {"general", "other"}:
             film_type = raw["film_type"]
         general = _normalize_mode(raw.get("general"), "general")
         other = _normalize_mode(raw.get("other"), "other")
-        # If nested missing one side but flat sites exist, ignore flat
     else:
-        # Migrate flat 0.2.x into other; seed general defaults
         other = _migrate_flat_to_other(raw)
         general = _mode_defaults("general")
         film_type = "other"
         if raw.get("film_type") in {"general", "other"}:
             film_type = raw["film_type"]
     return _flatten(shared, film_type, general, other)
+
+
+def load_config(path: Path | str | None = None) -> dict:
+    """Load config from ``path``, or the session path, or return defaults.
+
+    Never creates a file. Unknown keys are ignored. Types are validated.
+    """
+
+    target = Path(path).expanduser() if path else _config_path
+    if target is None:
+        return default_config()
+    try:
+        text = Path(target).read_text(encoding="utf-8")
+        raw = json.loads(text)
+    except (OSError, json.JSONDecodeError, UnicodeError):
+        return default_config()
+    if not isinstance(raw, dict):
+        return default_config()
+    return parse_config_dict(raw)
+
+
+def load_config_from(path: Path | str) -> dict:
+    """Load from ``path`` and set it as the session config path on success."""
+
+    target = Path(path).expanduser().resolve()
+    try:
+        text = target.read_text(encoding="utf-8")
+        raw = json.loads(text)
+    except (OSError, json.JSONDecodeError, UnicodeError) as exc:
+        raise OSError(f"无法读取配置: {exc}") from exc
+    if not isinstance(raw, dict):
+        raise OSError("配置文件格式无效（需要 JSON 对象）")
+    parsed = parse_config_dict(raw)
+    set_config_path(target)
+    return parsed
 
 
 def _payload_from_state(shared: dict, film_type: str, general: dict, other: dict) -> dict:
@@ -274,11 +410,16 @@ def _payload_from_state(shared: dict, film_type: str, general: dict, other: dict
         if shared.get("actor_avatar_source") in {"gfriends", "local"}
         else "gfriends"
     )
+    main_mode = shared.get("main_mode") if shared.get("main_mode") in MAIN_MODES else "4"
+    link_mode = shared.get("link_mode") if shared.get("link_mode") in LINK_MODES else "move"
     return {
         "film_type": film_type if film_type in {"general", "other"} else "other",
         "media_dir": str(shared.get("media_dir") or ""),
         "output_dir": str(shared.get("output_dir") or ""),
-        "output_mode": shared.get("output_mode") if shared.get("output_mode") in {"beside", "folder"} else "beside",
+        "main_mode": main_mode,
+        "link_mode": link_mode,
+        # Keep output_mode for older readers / docs
+        "output_mode": main_mode_to_output_mode(main_mode),
         "tmdb_key": str(shared.get("tmdb_key") or ""),
         "proxy": str(shared.get("proxy") or ""),
         "proxy_enabled": bool(shared.get("proxy_enabled", False)),
@@ -293,35 +434,39 @@ def _payload_from_state(shared: dict, film_type: str, general: dict, other: dict
     }
 
 
-def save_config(data: dict) -> None:
-    current = load_config()
+def build_save_payload(data: dict) -> dict:
+    """Build the on-disk JSON object from a runtime settings dict (no write)."""
+
+    current = default_config()
+    # Prefer nested blocks from data when present
     film_type = data.get("film_type") if data.get("film_type") in {"general", "other"} else current["film_type"]
 
     shared = {key: current[key] for key in SHARED_KEYS}
     for key in SHARED_KEYS:
         if key in data:
             shared[key] = data[key]
+    # Accept legacy output_mode when main_mode absent
+    if "main_mode" not in data and data.get("output_mode") in {"beside", "folder"}:
+        shared["main_mode"] = output_mode_to_main_mode(data["output_mode"])
+    if shared.get("main_mode") not in MAIN_MODES:
+        shared["main_mode"] = "4"
+    if shared.get("link_mode") not in LINK_MODES:
+        shared["link_mode"] = "move"
 
     general = copy.deepcopy(current["general"])
     other = copy.deepcopy(current["other"])
-
     if isinstance(data.get("general"), dict):
-        merged = {**general, **data["general"]}
-        general = _normalize_mode(merged, "general")
+        general = _normalize_mode({**general, **data["general"]}, "general")
     if isinstance(data.get("other"), dict):
-        merged = {**other, **data["other"]}
-        other = _normalize_mode(merged, "other")
+        other = _normalize_mode({**other, **data["other"]}, "other")
 
-    # Flat mode-key updates apply to the active (or explicit) film_type section
     flat_mode = {key: data[key] for key in MODE_KEYS if key in data}
     if flat_mode:
-        target = "general" if film_type == "general" else "other"
-        if target == "general":
+        if film_type == "general":
             general = _normalize_mode({**general, **flat_mode}, "general")
         else:
             other = _normalize_mode({**other, **flat_mode}, "other")
 
-    # Legacy javdb/tmdb/imdb checkbox overrides
     flags = {
         key: bool(data[key])
         for key in ("javdb", "tmdb", "imdb")
@@ -338,11 +483,43 @@ def save_config(data: dict) -> None:
         else:
             other["sites"] = normalize_sites(updated, film_type="other")
 
-    payload = _payload_from_state(shared, film_type, general, other)
-    CONFIG_PATH.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    return _payload_from_state(shared, film_type, general, other)
+
+
+def atomic_write_json(path: Path, payload: dict) -> None:
+    """Write JSON atomically (temp file in same dir, then replace)."""
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+    fd, tmp_name = tempfile.mkstemp(prefix=".config-", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        Path(tmp_name).replace(path)
+    except Exception:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
+def save_config(data: dict, path: Path | str | None = None) -> Path:
+    """Save ``data`` to ``path`` or the session path. Requires an explicit path.
+
+    Does not create a default beside the exe. Updates the session path on success.
+    """
+
+    target = Path(path).expanduser().resolve() if path else _config_path
+    if target is None:
+        raise OSError("未指定配置路径：请先「另存为」或使用 --config")
+    payload = build_save_payload(data)
+    atomic_write_json(target, payload)
+    set_config_path(target)
+    return target
 
 
 def effective_proxy(settings: dict) -> str:
@@ -366,17 +543,28 @@ def active_scrape_settings(settings: dict) -> dict:
         merged["sites"] = default_sites(film_type)
     else:
         merged["sites"] = normalize_sites(merged["sites"], film_type=film_type)
+    main_mode = merged.get("main_mode")
+    if isinstance(main_mode, int):
+        main_mode = str(main_mode)
+    if main_mode not in MAIN_MODES:
+        if merged.get("output_mode") in {"beside", "folder"}:
+            main_mode = output_mode_to_main_mode(merged["output_mode"])
+        else:
+            main_mode = "4"
+    merged["main_mode"] = main_mode
+    merged["output_mode"] = main_mode_to_output_mode(main_mode)
+    if merged.get("link_mode") not in LINK_MODES:
+        merged["link_mode"] = "move"
     return merged
 
 
 def run_job(settings: dict, stop_check, log, progress) -> None:
     payload = active_scrape_settings(settings)
     media = (payload.get("media_dir") or "").strip()
-    mode = payload.get("output_mode") or "beside"
     output = (payload.get("output_dir") or "").strip()
     scrape(
         Path(media),
-        mode=mode,
+        mode=payload.get("output_mode") or "beside",
         output_dir=Path(output) if output else None,
         use_imdb=True,
         sources=payload,
@@ -389,11 +577,10 @@ def run_job(settings: dict, stop_check, log, progress) -> None:
 
 def run_one_file(settings: dict, video: Path, stop_check, log, progress) -> None:
     payload = active_scrape_settings(settings)
-    mode = payload.get("output_mode") or "beside"
     output = (payload.get("output_dir") or "").strip()
     scrape_one(
         Path(video),
-        mode=mode,
+        mode=payload.get("output_mode") or "beside",
         output_dir=Path(output) if output else None,
         sources=payload,
         stop_check=stop_check,
@@ -417,49 +604,83 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="改用本机网页（默认是桌面窗口）",
     )
+    parser.add_argument(
+        "--config",
+        default=None,
+        help="配置文件路径（仅读写该文件；不指定则用内存默认，不写盘）",
+    )
     parser.add_argument("--media", help="媒体目录")
     parser.add_argument("--output", help="移动模式下的输出目录")
     parser.add_argument(
         "--mode",
         choices=["beside", "folder"],
-        help="beside=只在视频旁边写 nfo 和封面；folder=按演员/番号改名并移动到输出目录",
+        help="beside=只在视频旁边写 nfo 和封面；folder=按演员/番号改名并移动到输出目录（旧参数，等价 main_mode 4/1）",
+    )
+    parser.add_argument(
+        "--main-mode",
+        choices=list(MAIN_MODES),
+        default=None,
+        help="主运行模式：1 / 1_keep / 2 / 4 / 5",
     )
     parser.add_argument(
         "--film-type",
         choices=["general", "other"],
         default=None,
-        help="一般影片 general / 其他影片 other（默认沿用 config.json）",
+        help="一般影片 general / 其他影片 other（默认沿用配置或 other）",
     )
     parser.add_argument(
         "--imdb",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="是否查询 IMDb（默认沿用 config.json，否则开启）",
+        help="是否查询 IMDb",
     )
     parser.add_argument(
         "--javdb",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="是否查询 JavDB（默认沿用 config.json，否则开启）",
+        help="是否查询 JavDB",
     )
     parser.add_argument(
         "--tmdb",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="是否查询 TMDB（默认沿用 config.json，否则开启）",
+        help="是否查询 TMDB",
     )
     parser.add_argument("--tmdb-key", default=None, help="TMDB API Key")
+    parser.add_argument(
+        "--save-config",
+        action="store_true",
+        help="将本次 CLI 合并后的设置写回 --config 路径（需同时指定 --config）",
+    )
     return parser
 
 
 def cli(argv: list[str]) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    config = load_config()
+    if args.config:
+        try:
+            config = load_config_from(args.config)
+        except OSError as exc:
+            print(str(exc), file=sys.stderr)
+            # Missing file: start from defaults but remember path if user wants --save-config
+            config = default_config()
+            set_config_path(Path(args.config).expanduser().resolve())
+            print(f"将使用默认配置；可用 --save-config 写入 {args.config}", file=sys.stderr)
+    else:
+        set_config_path(None)
+        config = default_config()
+
     film_type = args.film_type or config.get("film_type") or "other"
     media = args.media if args.media is not None else config["media_dir"]
     output = args.output if args.output is not None else config["output_dir"]
-    mode = args.mode or config["output_mode"]
+    if args.main_mode:
+        main_mode = args.main_mode
+    elif args.mode:
+        main_mode = output_mode_to_main_mode(args.mode)
+    else:
+        main_mode = config.get("main_mode") or "4"
+    mode = main_mode_to_output_mode(main_mode)
     sites = normalize_sites(config.get("sites"), film_type=film_type)
     overrides = {"imdb": args.imdb, "javdb": args.javdb, "tmdb": args.tmdb}
     for item in sites:
@@ -478,22 +699,53 @@ def cli(argv: list[str]) -> int:
         "film_type": film_type,
         "media_dir": media,
         "output_dir": output,
+        "main_mode": main_mode,
         "output_mode": mode,
+        "link_mode": config.get("link_mode") or "move",
         "sites": sites,
         "tmdb_key": tmdb_key,
         "proxy": config.get("proxy") or "",
         "proxy_enabled": bool(config.get("proxy_enabled", False)),
         "skip_existing_nfo": bool(config.get("skip_existing_nfo", True)),
         "translate_plot": bool(config.get("translate_plot", True)),
+        "download_images": bool(config.get("download_images", True)),
+        "download_missing_only": bool(config.get("download_missing_only", False)),
+        "sleep_seconds": float(config.get("sleep_seconds") or 0.3),
+        "print_nfo": bool(config.get("print_nfo", True)),
+        "nfo_skip_days": int(config.get("nfo_skip_days") or 0),
+        "excluded_folders": str(config.get("excluded_folders") or "failed,.actors"),
+        "excluded_size_mb": float(config.get("excluded_size_mb") or 0),
+        "location_rule": str(config.get("location_rule") or ""),
+        "naming_rule": str(config.get("naming_rule") or ""),
+        "max_title_len": int(config.get("max_title_len") or 80),
+        "delete_chars": str(config.get("delete_chars") or ""),
+        "number_exclude_chars": str(config.get("number_exclude_chars") or ""),
+        "anonymous_fill": bool(config.get("anonymous_fill", False)),
+        "actor_only_tag": bool(config.get("actor_only_tag", False)),
         "general": config.get("general"),
         "other": config.get("other"),
     }
-    # Write flat site overrides into the chosen mode section
-    save_config(settings)
+    if args.save_config:
+        if not args.config:
+            print("--save-config 需要同时指定 --config 路径", file=sys.stderr)
+            return 2
+        try:
+            save_config(settings, args.config)
+            print(f"已保存配置: {args.config}", flush=True)
+        except OSError as exc:
+            print(f"保存配置失败: {exc}", file=sys.stderr)
+            return 1
     label = "一般影片" if film_type == "general" else "其他影片"
+    mode_labels = {
+        "1": "整理+改名移动",
+        "1_keep": "整理+保留原名移动",
+        "2": "仅位置规则移动",
+        "4": "原地刮削",
+        "5": "原地刮削并重命名",
+    }
     print(
         f"类型: {label}；"
-        f"模式: {'旁边写 nfo/封面' if mode == 'beside' else '按演员/番号改名并移动'}；"
+        f"主模式: {main_mode} ({mode_labels.get(main_mode, main_mode)})；"
         f"JavDB: {'开' if use_javdb else '关'}；"
         f"TMDB: {'开' if use_tmdb else '关'}；"
         f"IMDb: {'开' if use_imdb else '关'}"
@@ -517,12 +769,17 @@ def cli(argv: list[str]) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    # Optional env override for tests (same as --config)
+    env_config = os.environ.get("MOVIE_SCRAPER_CONFIG", "").strip()
+    if env_config and "--config" not in argv and not any(a.startswith("--config=") for a in argv):
+        argv = ["--config", env_config, *argv]
     wants_help = "--help" in argv or "-h" in argv
     wants_web = "--web" in argv
     wants_cli = "--cli" in argv or any(
         arg.startswith("--media")
         or arg.startswith("--output")
         or arg.startswith("--mode")
+        or arg.startswith("--main-mode")
         or arg.startswith("--film-type")
         or arg.startswith("--imdb")
         or arg.startswith("--no-imdb")
@@ -530,8 +787,24 @@ def main(argv: list[str] | None = None) -> int:
         or arg.startswith("--no-javdb")
         or arg.startswith("--tmdb")
         or arg.startswith("--no-tmdb")
+        or arg.startswith("--config")
+        or arg == "--save-config"
         for arg in argv
     )
+    # Pre-set session path from --config for GUI too
+    config_arg = None
+    for index, arg in enumerate(argv):
+        if arg == "--config" and index + 1 < len(argv):
+            config_arg = argv[index + 1]
+            break
+        if arg.startswith("--config="):
+            config_arg = arg.split("=", 1)[1]
+            break
+    if config_arg and not wants_cli:
+        try:
+            load_config_from(config_arg)
+        except OSError:
+            set_config_path(Path(config_arg).expanduser().resolve())
     if wants_web and not wants_cli and not wants_help:
         from webui import serve
         return serve()

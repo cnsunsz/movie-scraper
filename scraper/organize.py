@@ -1,10 +1,14 @@
-"""Scan a media folder, write NFO and artwork, optionally copy into a new folder.
+"""Scan a media folder, write NFO and artwork, optionally move / rename / symlink.
 
-Beside mode leaves the video where it is. Folder mode renames and moves it.
-Folder layout follows MDC: ``输出/演员/番号或标题/``.
-Beside the nfo, in both modes: ``poster.jpg``, ``fanart.jpg``, ``thumb.jpg``.
-``extrafanart/extrafanart-N.jpg`` only when the source actually has stills.
-The nfo name is always ``{视频文件名}.nfo``.
+Main modes (MDC-aligned):
+  1       organize + NFO + images, rename and move
+  1_keep  organize + NFO + images, move keeping original filename
+  2       move by location rule (scrape when possible; still move on miss)
+  4       scrape in place (NFO + images beside file, no move)
+  5       scrape in place and rename using naming_rule
+
+``link_mode``: move (default) or soft_link (symlink into output). Hard link / strm
+are not supported. Beside the nfo: ``poster.jpg``, ``fanart.jpg``, ``thumb.jpg``.
 """
 
 from __future__ import annotations
@@ -33,6 +37,8 @@ from scraper.tmdb import lookup as tmdb_lookup
 from scraper.translate import has_cjk, translate_to_zh
 
 SKIP_DIR_NAMES = {"failed", ".actors"}
+MAIN_MODES = ("1", "1_keep", "2", "4", "5")
+LINK_MODES = ("move", "soft_link")
 _INVALID_FOLDER_CHARS = re.compile(r'[\\/:*?"<>|\r\n\t]+')
 _LABELS = SITE_LABELS
 _CODE_SITES = set(CODE_SITES)
@@ -86,6 +92,29 @@ def list_videos(
     return found
 
 
+
+def _resolve_main_mode(mode: str, sources: dict | None) -> str:
+    """Accept main_mode (1/1_keep/2/4/5) or legacy beside/folder."""
+
+    if isinstance(sources, dict):
+        raw = sources.get("main_mode")
+        if isinstance(raw, int):
+            raw = str(raw)
+        if raw in MAIN_MODES:
+            return raw
+    if mode in MAIN_MODES:
+        return mode
+    if mode == "folder":
+        return "1"
+    if mode == "beside":
+        return "4"
+    return "4"
+
+
+def _needs_output(main_mode: str) -> bool:
+    return main_mode in {"1", "1_keep", "2"}
+
+
 def scrape(
     media_dir: Path,
     *,
@@ -106,15 +135,17 @@ def scrape(
 
     media_dir = Path(media_dir)
     options = _options(use_imdb, sources)
-    if mode not in {"beside", "folder"}:
-        log(f"未知输出方式: {mode}")
+    main_mode = _resolve_main_mode(mode, sources)
+    options["main_mode"] = main_mode
+    if main_mode not in MAIN_MODES:
+        log(f"未知主运行模式: {main_mode}")
         return
     if not media_dir.is_dir():
         log(f"媒体目录不存在: {media_dir}")
         return
-    if mode == "folder":
+    if _needs_output(main_mode):
         if output_dir is None or not str(output_dir).strip():
-            log("「按演员/标题改名并移动」需要选择输出目录")
+            log("当前主运行模式需要选择输出目录")
             return
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -125,7 +156,20 @@ def scrape(
     options["proxy"] = proxy_url
 
     film_label = "一般影片" if options.get("film_type") == "general" else "其他影片"
+    mode_labels = {
+        "1": "整理+NFO+图片+改名移动",
+        "1_keep": "整理+NFO+图片+保留原名移动",
+        "2": "仅位置规则整理/移动",
+        "4": "原地刮削",
+        "5": "原地刮削并重命名",
+    }
     log(f"影片类型: {film_label}")
+    log(f"主运行模式: {main_mode}（{mode_labels.get(main_mode, main_mode)}）")
+    link_mode = options.get("link_mode") or "move"
+    if link_mode == "soft_link":
+        log("整理方式: 软链接（symlink）")
+    else:
+        log("整理方式: 移动")
     files = list_videos(
         media_dir,
         excluded_folders=options.get("excluded_folders"),
@@ -139,6 +183,7 @@ def scrape(
     if total == 0:
         return
 
+    pause = float(options.get("sleep_seconds") or pause_seconds or 0)
     for index, src in enumerate(files, start=1):
         if stop_check():
             log("已停止")
@@ -147,7 +192,6 @@ def scrape(
         try:
             used_network = _process_one(
                 src,
-                mode=mode,
                 output_dir=output_dir,
                 options=options,
                 log=log,
@@ -155,8 +199,8 @@ def scrape(
         except Exception as exc:
             log(f"处理失败 {src.name}: {exc}")
             used_network = False
-        if used_network and pause_seconds and index < total and not stop_check():
-            time.sleep(pause_seconds)
+        if used_network and pause and index < total and not stop_check():
+            time.sleep(pause)
     if stop_check():
         log("已停止")
         return
@@ -180,12 +224,14 @@ def scrape_one(
         log(f"文件不存在: {video}")
         return
     options = _options(True, sources)
-    if mode not in {"beside", "folder"}:
-        log(f"未知输出方式: {mode}")
+    main_mode = _resolve_main_mode(mode, sources)
+    options["main_mode"] = main_mode
+    if main_mode not in MAIN_MODES:
+        log(f"未知主运行模式: {main_mode}")
         return
-    if mode == "folder":
+    if _needs_output(main_mode):
         if output_dir is None or not str(output_dir).strip():
-            log("「按演员/标题改名并移动」需要选择输出目录")
+            log("当前主运行模式需要选择输出目录")
             return
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -203,7 +249,6 @@ def scrape_one(
     try:
         _process_one(
             video,
-            mode=mode,
             output_dir=output_dir,
             options=options,
             log=log,
@@ -214,7 +259,6 @@ def scrape_one(
         log("已停止")
         return
     log("全部完成")
-
 
 
 def _options(use_imdb: bool, sources: dict | None) -> dict:
@@ -231,6 +275,8 @@ def _options(use_imdb: bool, sources: dict | None) -> dict:
             "sites": sites,
             "tmdb_key": "",
             "proxy": "",
+            "main_mode": "4",
+            "link_mode": "move",
             "skip_existing_nfo": False,
             "translate_plot": False,
             "download_images": True,
@@ -243,11 +289,15 @@ def _options(use_imdb: bool, sources: dict | None) -> dict:
             "naming_rule": "number+'-'+title" if film_type == "other" else "title.year",
             "max_title_len": 80,
             "delete_chars": "",
+            "number_exclude_chars": "",
             "uppercase_name": False,
+            "anonymous_fill": film_type == "other",
+            "actor_only_tag": False,
             "extrafanart": True,
             "trailer": False,
             "storyline": False,
             "tpdb_token": "",
+            "sleep_seconds": 0.3,
         }
     if isinstance(sources.get("sites"), list):
         sites = normalize_sites(sources.get("sites"), film_type=film_type)
@@ -266,11 +316,23 @@ def _options(use_imdb: bool, sources: dict | None) -> dict:
         )
     default_location = "genres+'/'+title" if film_type == "general" else "actor+'/'+number"
     default_naming = "title.year" if film_type == "general" else "number+'-'+title"
+    main_mode = sources.get("main_mode")
+    if isinstance(main_mode, int):
+        main_mode = str(main_mode)
+    if main_mode not in MAIN_MODES:
+        legacy_mode = sources.get("output_mode")
+        if legacy_mode == "folder":
+            main_mode = "1"
+        else:
+            main_mode = "4"
+    link_mode = sources.get("link_mode") if sources.get("link_mode") in LINK_MODES else "move"
     return {
         "film_type": film_type,
         "sites": sites,
         "tmdb_key": str(sources.get("tmdb_key") or ""),
         "proxy": str(sources.get("proxy") or ""),
+        "main_mode": main_mode,
+        "link_mode": link_mode,
         "skip_existing_nfo": bool(sources.get("skip_existing_nfo", True)),
         "translate_plot": bool(sources.get("translate_plot", film_type != "general")),
         "download_images": bool(sources.get("download_images", True)),
@@ -283,11 +345,15 @@ def _options(use_imdb: bool, sources: dict | None) -> dict:
         "naming_rule": str(sources.get("naming_rule") or default_naming),
         "max_title_len": int(sources.get("max_title_len") or 80),
         "delete_chars": str(sources.get("delete_chars") or ""),
+        "number_exclude_chars": str(sources.get("number_exclude_chars") or ""),
         "uppercase_name": bool(sources.get("uppercase_name", False)),
+        "anonymous_fill": bool(sources.get("anonymous_fill", film_type == "other")),
+        "actor_only_tag": bool(sources.get("actor_only_tag", False)),
         "extrafanart": bool(sources.get("extrafanart", True)),
         "trailer": bool(sources.get("trailer", False)),
         "storyline": bool(sources.get("storyline", False)),
         "tpdb_token": str(sources.get("tpdb_token") or ""),
+        "sleep_seconds": float(sources.get("sleep_seconds") or 0.3),
     }
 
 
@@ -301,15 +367,38 @@ def _nfo_fresh(path: Path, skip_days: int) -> bool:
     return age < skip_days * 86400
 
 
+def _place_video(src: Path, destination: Path, link_mode: str, log: LogFn) -> bool:
+    """Move or soft-link ``src`` to ``destination``. Returns False if skipped."""
+
+    if destination.resolve() == src.resolve():
+        log(f"输出路径与原文件相同，不移动: {destination}")
+        return True
+    if destination.exists():
+        log(f"目标已存在，不覆盖、不移动原文件，跳过写入: {destination}")
+        return False
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if link_mode == "soft_link":
+        try:
+            os.symlink(src, destination)
+            log(f"已创建软链接: {src.name} -> {destination}")
+            return True
+        except OSError as exc:
+            log(f"软链接失败（Windows 可能需要开发者模式或管理员权限）: {exc}")
+            log("回退为移动文件")
+    shutil.move(str(src), str(destination))
+    log(f"已改名并移动: {src.name} -> {destination}")
+    return True
+
+
 def _process_one(
     src: Path,
     *,
-    mode: str,
     output_dir: Path | None,
     options: dict,
     log: LogFn,
 ) -> bool:
-    parsed = parse_filename(src.name)
+    exclude = str(options.get("number_exclude_chars") or "")
+    parsed = parse_filename(src.name, exclude_chars=exclude)
     log(
         f"{src.name} -> IMDb {parsed.imdb_id or '-'} / "
         f"番号 {parsed.code or '-'} / 标题 {parsed.title or '-'}"
@@ -321,12 +410,22 @@ def _process_one(
     if options.get("storyline"):
         log("剧情简介扩展开关已开：暂未实现")
 
-    if options["skip_existing_nfo"] and mode == "beside" and src.with_suffix(".nfo").exists():
-        log(f"已有 NFO，跳过 {src.name}")
-        return False
-    if mode == "beside" and _nfo_fresh(src.with_suffix(".nfo"), int(options.get("nfo_skip_days") or 0)):
-        log(f"NFO 未过期（nfo_skip_days），跳过 {src.name}")
-        return False
+    main_mode = options.get("main_mode") or "4"
+    link_mode = options.get("link_mode") if options.get("link_mode") in LINK_MODES else "move"
+    write_meta = main_mode != "2"  # mode 2 is move-first; meta optional
+    do_rename = main_mode in {"1", "5"}
+    do_move = main_mode in {"1", "1_keep", "2"}
+    keep_name = main_mode in {"1_keep", "2", "4"}
+
+    # Skip checks for in-place nfo
+    if main_mode in {"4", "5"}:
+        nfo_probe = src.with_suffix(".nfo")
+        if options["skip_existing_nfo"] and nfo_probe.exists() and main_mode == "4":
+            log(f"已有 NFO，跳过 {src.name}")
+            return False
+        if main_mode == "4" and _nfo_fresh(nfo_probe, int(options.get("nfo_skip_days") or 0)):
+            log(f"NFO 未过期（nfo_skip_days），跳过 {src.name}")
+            return False
 
     meta, used_network = _lookup(parsed, options, log)
     if meta is None or not meta.title:
@@ -344,6 +443,10 @@ def _process_one(
             meta.year = parsed.year
         log(f"使用 {_LABELS.get(meta.source, meta.source or '文件名')}: {meta.title}")
 
+    if options.get("anonymous_fill") and not any((name or "").strip() for name in (meta.cast or [])):
+        meta.cast = ["佚名"]
+        log("匿名演员填充: 佚名")
+
     if options["translate_plot"] and meta.plot and not has_cjk(meta.plot):
         try:
             meta.plot = translate_to_zh(meta.plot, proxy=options["proxy"])
@@ -352,7 +455,8 @@ def _process_one(
         except Exception as exc:
             log(f"简介翻译失败，保留原文: {exc}")
 
-    if mode == "folder":
+    # Mode 2: still prefer scrape, but always try to move even with filename-only meta
+    if do_move:
         if output_dir is None:
             log("缺少输出目录，跳过移动")
             return used_network
@@ -365,7 +469,34 @@ def _process_one(
             max_title_len=int(options.get("max_title_len") or 80),
         )
         folder.mkdir(parents=True, exist_ok=True)
-        destination = folder / video_filename(
+        if keep_name or not do_rename:
+            destination = folder / src.name
+        else:
+            destination = folder / video_filename(
+                src,
+                meta,
+                naming_rule=options.get("naming_rule") or "",
+                delete_chars=options.get("delete_chars") or "",
+                uppercase_name=bool(options.get("uppercase_name")),
+                max_title_len=int(options.get("max_title_len") or 80),
+            )
+        nfo_path = destination.with_suffix(".nfo")
+        if write_meta and options["skip_existing_nfo"] and nfo_path.exists():
+            log(f"已有 NFO，跳过 {nfo_path}")
+            return used_network
+        if write_meta and _nfo_fresh(nfo_path, int(options.get("nfo_skip_days") or 0)):
+            log(f"NFO 未过期（nfo_skip_days），跳过 {nfo_path}")
+            return used_network
+        placed = _place_video(src, destination, link_mode, log)
+        if not placed:
+            return used_network
+        # After move, src may be gone; work against destination
+        work = destination if destination.exists() else src
+        artwork_dir = folder
+        nfo_path = work.with_suffix(".nfo")
+    elif main_mode == "5":
+        # Rename in place
+        new_name = video_filename(
             src,
             meta,
             naming_rule=options.get("naming_rule") or "",
@@ -373,26 +504,35 @@ def _process_one(
             uppercase_name=bool(options.get("uppercase_name")),
             max_title_len=int(options.get("max_title_len") or 80),
         )
-        nfo_path = destination.with_suffix(".nfo")
-        if options["skip_existing_nfo"] and nfo_path.exists():
-            log(f"已有 NFO，跳过 {nfo_path}")
-            return used_network
-        if _nfo_fresh(nfo_path, int(options.get("nfo_skip_days") or 0)):
-            log(f"NFO 未过期（nfo_skip_days），跳过 {nfo_path}")
-            return used_network
-        if destination.resolve() == src.resolve():
-            log(f"输出路径与原文件相同，不移动: {destination}")
-        elif destination.exists():
-            log(f"目标已存在，不覆盖、不移动原文件，跳过写入: {destination}")
-            return used_network
-        else:
-            folder.mkdir(parents=True, exist_ok=True)
-            shutil.move(src, destination)
-            log(f"已改名并移动: {src.name} -> {destination}")
-        artwork_dir = folder
-    else:
+        destination = src.with_name(new_name)
+        if destination.resolve() != src.resolve():
+            if destination.exists():
+                log(f"目标已存在，不覆盖、不重命名: {destination}")
+                return used_network
+            src.rename(destination)
+            log(f"已原地重命名: {src.name} -> {destination.name}")
+            src = destination
         nfo_path = src.with_suffix(".nfo")
         artwork_dir = src.parent
+        if options["skip_existing_nfo"] and nfo_path.exists():
+            # Still renamed; skip rewriting nfo if requested
+            log(f"已有 NFO，跳过写入 {nfo_path.name}")
+            return used_network
+        if _nfo_fresh(nfo_path, int(options.get("nfo_skip_days") or 0)):
+            log(f"NFO 未过期（nfo_skip_days），跳过 {nfo_path.name}")
+            return used_network
+    else:
+        # mode 4 beside
+        nfo_path = src.with_suffix(".nfo")
+        artwork_dir = src.parent
+
+    if not write_meta:
+        # Mode 2: optional minimal meta — write nfo only when we actually scraped
+        if meta.source and options.get("print_nfo", True):
+            write_meta = True
+        else:
+            log("模式2：无刮削数据，仅完成移动/链接")
+            return used_network
 
     if options.get("download_images", True):
         artwork = _save_artwork(
@@ -413,12 +553,17 @@ def _process_one(
         }
         actor_files = {}
     if options.get("print_nfo", True):
-        write_nfo(nfo_path, meta, artwork=artwork, actor_files=actor_files)
+        write_nfo(
+            nfo_path,
+            meta,
+            artwork=artwork,
+            actor_files=actor_files,
+            actor_only_tag=bool(options.get("actor_only_tag")),
+        )
         log(f"写入 {nfo_path.name}")
     else:
         log("已关闭写入 NFO")
     return used_network
-
 
 
 def video_filename(
@@ -432,14 +577,15 @@ def video_filename(
 ) -> str:
     """Build video stem from ``naming_rule`` (default ``number-title``)."""
 
-    values = rule_values(meta)
+    values = rule_values(meta, suffix=src.suffix.lstrip("."))
     if uppercase_name and values.get("number"):
         values["number"] = values["number"].upper()
+        if values.get("prefix"):
+            values["prefix"] = values["prefix"].upper()
     rule = (naming_rule or "").strip() or "number+'-'+title"
     code = (values.get("number") or "").strip()
     title = (values.get("title") or "").strip()
     # When the title already starts with the code, avoid number+title doubling
-    # (legacy behavior: use the title alone).
     rule_compact = rule.replace(" ", "").lower()
     if (
         code
@@ -476,6 +622,8 @@ def movie_folder(
     values = rule_values(meta)
     if uppercase_name and values.get("number"):
         values["number"] = values["number"].upper()
+        if values.get("prefix"):
+            values["prefix"] = values["prefix"].upper()
     rule = (location_rule or "").strip() or "actor+'/'+number"
     relative = eval_rule(rule, values, default="")
     if not relative:
@@ -499,6 +647,7 @@ def movie_folder(
     if not parts:
         parts = [sanitize_folder_name(meta.code or meta.title or "未知")]
     return Path(output_dir).joinpath(*parts)
+
 
 
 def _lookup(parsed, options: dict, log: LogFn) -> tuple[MovieMetadata | None, bool]:

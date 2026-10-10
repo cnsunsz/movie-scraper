@@ -72,37 +72,59 @@ class SiteOrderTests(unittest.TestCase):
 
 
 class ConfigRoundTripTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        app_module.set_config_path(None)
+
+    def test_default_config_does_not_touch_disk(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app_module.set_config_path(None)
+            cfg = app_module.default_config()
+            self.assertEqual(cfg["main_mode"], "4")
+            self.assertFalse((root / "config.json").exists())
+            # load_config with no path returns defaults, no write
+            loaded = app_module.load_config()
+            self.assertEqual(loaded["main_mode"], "4")
+            self.assertIsNone(app_module.get_config_path())
+
+    def test_save_requires_explicit_path(self) -> None:
+        app_module.set_config_path(None)
+        with self.assertRaises(OSError):
+            app_module.save_config({"media_dir": "/x"})
+
     def test_load_save_keeps_new_keys(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             config_path = root / "config.json"
-            with mock.patch.object(app_module, "CONFIG_PATH", config_path), mock.patch.object(
-                app_module, "APP_DIR", root
-            ):
-                app_module.save_config(
-                    {
-                        "media_dir": str(root / "media"),
-                        "output_dir": str(root / "out"),
-                        "output_mode": "folder",
-                        "sites": [
-                            {"name": "javbus", "enabled": True},
-                            {"name": "javdb", "enabled": False},
-                        ],
-                        "tmdb_key": "secret-key",
-                        "proxy": "http://127.0.0.1:7890",
-                        "proxy_enabled": True,
-                        "skip_existing_nfo": False,
-                        "translate_plot": False,
-                        "emby_type": "jellyfin",
-                        "emby_url": "http://127.0.0.1:8096",
-                        "emby_api_key": "emby-secret",
-                        "emby_user_id": "uid",
-                        "actor_avatar_source": "local",
-                        "actor_local_dir": str(root / "faces"),
-                    }
-                )
-                loaded = app_module.load_config()
-                raw = json.loads(config_path.read_text(encoding="utf-8"))
+            app_module.set_config_path(None)
+            app_module.save_config(
+                {
+                    "media_dir": str(root / "media"),
+                    "output_dir": str(root / "out"),
+                    "main_mode": "1",
+                    "sites": [
+                        {"name": "javbus", "enabled": True},
+                        {"name": "javdb", "enabled": False},
+                    ],
+                    "tmdb_key": "secret-key",
+                    "proxy": "http://127.0.0.1:7890",
+                    "proxy_enabled": True,
+                    "skip_existing_nfo": False,
+                    "translate_plot": False,
+                    "anonymous_fill": True,
+                    "actor_only_tag": True,
+                    "emby_type": "jellyfin",
+                    "emby_url": "http://127.0.0.1:8096",
+                    "emby_api_key": "emby-secret",
+                    "emby_user_id": "uid",
+                    "actor_avatar_source": "local",
+                    "actor_local_dir": str(root / "faces"),
+                },
+                config_path,
+            )
+            loaded = app_module.load_config_from(config_path)
+            raw = json.loads(config_path.read_text(encoding="utf-8"))
+        self.assertEqual(loaded["main_mode"], "1")
         self.assertEqual(loaded["output_mode"], "folder")
         self.assertTrue(loaded["proxy_enabled"])
         self.assertEqual(loaded["proxy"], "http://127.0.0.1:7890")
@@ -112,13 +134,33 @@ class ConfigRoundTripTests(unittest.TestCase):
         self.assertEqual(loaded["actor_avatar_source"], "local")
         self.assertFalse(loaded["skip_existing_nfo"])
         self.assertFalse(loaded["translate_plot"])
+        self.assertTrue(loaded["anonymous_fill"])
+        self.assertTrue(loaded["actor_only_tag"])
         names = [item["name"] for item in loaded["sites"]]
         self.assertEqual(names[0], "javbus")
         enabled = {item["name"]: item["enabled"] for item in loaded["sites"]}
         self.assertTrue(enabled["javbus"])
         self.assertFalse(enabled["javdb"])
         self.assertEqual(raw["emby_api_key"], "emby-secret")
+        self.assertEqual(raw["main_mode"], "1")
         self.assertNotIn("javdb_cookie", raw)
+
+    def test_atomic_save_and_migrate_output_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            legacy = root / "legacy.json"
+            legacy.write_text(
+                json.dumps({"output_mode": "folder", "media_dir": str(root / "m"), "film_type": "other"}),
+                encoding="utf-8",
+            )
+            loaded = app_module.load_config_from(legacy)
+            self.assertEqual(loaded["main_mode"], "1")
+            out = root / "out.json"
+            app_module.save_config(loaded, out)
+            raw = json.loads(out.read_text(encoding="utf-8"))
+            self.assertEqual(raw["main_mode"], "1")
+            self.assertIn("general", raw)
+            self.assertIn("other", raw)
 
     def test_effective_proxy_respects_toggle(self) -> None:
         self.assertEqual(
@@ -190,7 +232,7 @@ class ScrapeOneEdgeTests(unittest.TestCase):
                 stop_check=lambda: False,
                 log=logs.append,
             )
-        self.assertTrue(any("输出目录" in line for line in logs))
+        self.assertTrue(any("输出目录" in line or "主运行模式" in line for line in logs))
 
     def test_list_videos_skips_failed_and_actors(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -234,6 +276,9 @@ class DestinationExistsTests(unittest.TestCase):
                     ],
                     "skip_existing_nfo": False,
                     "translate_plot": False,
+                    "anonymous_fill": False,
+                    "location_rule": "number",
+                    "naming_rule": "number",
                 },
                 stop_check=lambda: False,
                 log=logs.append,

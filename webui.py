@@ -9,7 +9,7 @@ from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from app import load_config, run_job, save_config
+from app import default_config, load_config, run_job
 
 HOST = "127.0.0.1"
 PORTS = range(8765, 8771)
@@ -206,7 +206,7 @@ def start_job(fields: dict[str, str]) -> tuple[bool, str, int]:
         "imdb": use_imdb,
     }
     try:
-        save_config(settings)
+        # GUI/web no longer auto-writes config.json beside the app
     except OSError as exc:
         _log(f"无法保存 config.json: {exc}")
 

@@ -72,16 +72,24 @@ class ParsedName:
     year: str | None
 
 
-def parse_filename(filename: str) -> ParsedName:
+def parse_filename(filename: str, *, exclude_chars: str = "") -> ParsedName:
     """Parse ``filename`` (a path or a bare name).
 
     Order: IMDb id ``tt`` + 7 or 8 digits, then a studio code, otherwise the
     cleaned stem is the title. A trailing ``-cd1`` / ``-part1`` is not part
     of the code.
+
+    ``exclude_chars``: comma-separated substrings stripped before extraction
+    (MDC「号码提取排除字符」), e.g. ``xxx.com@,bbb.net``.
     """
 
     base = os.path.basename(str(filename).replace("\\", "/"))
     stem = _strip_video_ext(base)
+    if exclude_chars:
+        for token in str(exclude_chars).split(","):
+            piece = token.strip()
+            if piece:
+                stem = stem.replace(piece, " ")
 
     imdb_id = None
     imdb_span = None

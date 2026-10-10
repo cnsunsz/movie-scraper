@@ -33,12 +33,13 @@ def _load_extra_qt_libs() -> None:
 
 _load_extra_qt_libs()
 
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QFont
+from PySide6.QtCore import Qt, QTimer, QUrl
+from PySide6.QtGui import QFont, QDragEnterEvent, QDropEvent
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
     QCheckBox,
+    QComboBox,
     QDoubleSpinBox,
     QFileDialog,
     QFrame,
@@ -60,7 +61,20 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app import APP_DIR, __version__, effective_proxy, load_config, run_job, run_one_file, save_config
+from app import (
+    APP_DIR,
+    MAIN_MODES,
+    __version__,
+    default_config,
+    effective_proxy,
+    get_config_path,
+    load_config,
+    load_config_from,
+    run_job,
+    run_one_file,
+    save_config,
+    set_config_path,
+)
 from scraper.parser import parse_filename
 from scraper.sources import SITE_LABELS, default_sites, normalize_sites
 
@@ -254,8 +268,9 @@ class MainWindow(QMainWindow):
         self._queue: queue.Queue = queue.Queue()
         self._summary = {"success": 0, "fail": 0, "skip": 0, "lines": []}
         self._job_kind = ""
+        self._config_path = get_config_path()  # session path; None = unsaved defaults
 
-        config = load_config()
+        config = load_config()  # defaults or session --config; never auto-creates file
         self._film_type = config.get("film_type") if config.get("film_type") in {"general", "other"} else "other"
         self._mode_cache = {
             "general": dict(config.get("general") or {}),
@@ -293,6 +308,7 @@ class MainWindow(QMainWindow):
         self._sync_proxy_enabled()
         self._sync_avatar_source()
         self._sync_film_type_style()
+        self._refresh_config_path_label()
         self._set_nav(0)
 
         self._timer = QTimer(self)
@@ -395,12 +411,40 @@ class MainWindow(QMainWindow):
         self.progress = QLabel("进度: 0 / 0")
         self.progress.setStyleSheet("color: #555555; font-size: 13px;")
         layout.addWidget(self.progress)
+        drop_hint = QLabel("可将视频文件拖到下方日志区进行单文件刮削")
+        drop_hint.setStyleSheet("color: #888; font-size: 12px;")
+        layout.addWidget(drop_hint)
         self.log = QPlainTextEdit()
         self.log.setObjectName("runLog")
         self.log.setReadOnly(True)
         self.log.setMaximumBlockCount(4000)
+        self.log.setAcceptDrops(True)
+        self.log.dragEnterEvent = self._run_drag_enter  # type: ignore[method-assign]
+        self.log.dropEvent = self._run_drop  # type: ignore[method-assign]
         layout.addWidget(self.log, 1)
         return page
+
+    def _run_drag_enter(self, event: QDragEnterEvent) -> None:
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def _run_drop(self, event: QDropEvent) -> None:
+        urls = event.mimeData().urls() if event.mimeData() else []
+        videos = []
+        for url in urls:
+            local = url.toLocalFile()
+            if local and Path(local).is_file():
+                videos.append(Path(local))
+        if not videos:
+            return
+        event.acceptProposedAction()
+        # First file via single-file scrape; rest noted
+        self.custom_file_edit.setText(str(videos[0]))
+        if len(videos) > 1:
+            self._append(f"拖入 {len(videos)} 个文件，先处理: {videos[0].name}")
+        self._start_one_file()
 
     def _build_done_page(self) -> QWidget:
         page = QWidget()
@@ -497,33 +541,76 @@ class MainWindow(QMainWindow):
         dir_layout.addLayout(media_row)
 
         mode_row = QHBoxLayout()
-        mode_row.addWidget(QLabel("输出模式"))
-        self.beside_radio = QRadioButton("旁边写文件")
-        self.folder_radio = QRadioButton("按规则改名并移动")
-        self._modes = QButtonGroup(self)
-        self._modes.addButton(self.beside_radio)
-        self._modes.addButton(self.folder_radio)
-        if config.get("output_mode") == "folder":
-            self.folder_radio.setChecked(True)
-        else:
-            self.beside_radio.setChecked(True)
-        self.beside_radio.toggled.connect(self._sync_mode)
-        mode_row.addWidget(self.beside_radio)
-        mode_row.addWidget(self.folder_radio)
-        mode_row.addStretch(1)
+        mode_row.addWidget(QLabel("主运行模式"))
+        self.main_mode_combo = QComboBox()
+        self._main_mode_items = [
+            ("1", "1 · 整理+NFO+图片+改名并移动"),
+            ("1_keep", "1_keep · 整理+NFO+图片+保留原名移动"),
+            ("2", "2 · 仅按位置规则整理/移动"),
+            ("4", "4 · 原地刮削（旁写 NFO/图片）"),
+            ("5", "5 · 原地刮削并重命名"),
+        ]
+        for value, label in self._main_mode_items:
+            self.main_mode_combo.addItem(label, value)
+        mm = str(config.get("main_mode") or "4")
+        if mm not in MAIN_MODES:
+            mm = "4"
+        idx = next((i for i, (v, _) in enumerate(self._main_mode_items) if v == mm), 3)
+        self.main_mode_combo.setCurrentIndex(idx)
+        self.main_mode_combo.currentIndexChanged.connect(self._sync_mode)
+        mode_row.addWidget(self.main_mode_combo, 1)
         dir_layout.addLayout(mode_row)
+
+        link_row = QHBoxLayout()
+        link_row.addWidget(QLabel("整理方式"))
+        self.link_move_radio = QRadioButton("移动")
+        self.link_soft_radio = QRadioButton("软链接")
+        self._link_group = QButtonGroup(self)
+        self._link_group.addButton(self.link_move_radio)
+        self._link_group.addButton(self.link_soft_radio)
+        if config.get("link_mode") == "soft_link":
+            self.link_soft_radio.setChecked(True)
+        else:
+            self.link_move_radio.setChecked(True)
+        link_row.addWidget(self.link_move_radio)
+        link_row.addWidget(self.link_soft_radio)
+        link_note = QLabel("暂不支持硬链接/strm")
+        link_note.setStyleSheet("color: #888; font-size: 12px; border: none;")
+        link_row.addWidget(link_note)
+        link_row.addStretch(1)
+        dir_layout.addLayout(link_row)
 
         output_row = QHBoxLayout()
         self.output_label = QLabel("输出目录")
         output_row.addWidget(self.output_label)
         self.output_edit = QLineEdit(str(config.get("output_dir") or ""))
-        self.output_edit.setPlaceholderText("移动模式的输出根目录")
+        self.output_edit.setPlaceholderText("模式 1 / 1_keep / 2 的输出根目录")
         output_row.addWidget(self.output_edit, 1)
         self.output_btn = QPushButton("浏览")
         self.output_btn.setStyleSheet("QPushButton { background: white; border: 1px solid #D0D0D0; padding: 6px 12px; border-radius: 4px; }")
         self.output_btn.clicked.connect(self._browse_output)
         output_row.addWidget(self.output_btn)
         dir_layout.addLayout(output_row)
+
+        cfg_row = QHBoxLayout()
+        self.config_path_label = QLabel("配置：未加载（使用内存默认，关闭不写盘）")
+        self.config_path_label.setStyleSheet("color: #666; font-size: 12px; border: none;")
+        self.config_path_label.setWordWrap(True)
+        cfg_row.addWidget(self.config_path_label, 1)
+        load_btn = QPushButton("加载配置")
+        save_btn = QPushButton("保存")
+        save_as_btn = QPushButton("另存为")
+        for btn in (load_btn, save_btn, save_as_btn):
+            btn.setStyleSheet("QPushButton { background: white; border: 1px solid #D0D0D0; padding: 6px 12px; border-radius: 4px; }")
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        load_btn.clicked.connect(self._load_config_dialog)
+        save_btn.clicked.connect(self._save_config_dialog)
+        save_as_btn.clicked.connect(self._save_as_config_dialog)
+        self.save_btn = save_btn
+        cfg_row.addWidget(load_btn)
+        cfg_row.addWidget(save_btn)
+        cfg_row.addWidget(save_as_btn)
+        dir_layout.addLayout(cfg_row)
         grid.addWidget(dir_card, 0, 0)
 
         # Network (shared)
@@ -572,6 +659,8 @@ class MainWindow(QMainWindow):
         self.download_missing_box = QCheckBox("仅下载缺失图片")
         self.print_nfo_box = QCheckBox("写入 NFO")
         self.extrafanart_box = QCheckBox("下载剧照 extrafanart")
+        self.anonymous_fill_box = QCheckBox("匿名演员填充为「佚名」")
+        self.actor_only_tag_box = QCheckBox("tag 只保留演员")
         self.trailer_box = QCheckBox("预告片（暂未实现）")
         self.storyline_box = QCheckBox("剧情扩展（暂未实现）")
         for box in (
@@ -580,6 +669,8 @@ class MainWindow(QMainWindow):
             self.download_missing_box,
             self.print_nfo_box,
             self.extrafanart_box,
+            self.anonymous_fill_box,
+            self.actor_only_tag_box,
             self.trailer_box,
             self.storyline_box,
         ):
@@ -685,7 +776,17 @@ class MainWindow(QMainWindow):
         self.delete_chars_edit.setPlaceholderText("这些字符会从命名结果中去掉")
         del_row.addWidget(self.delete_chars_edit, 1)
         name_layout.addLayout(del_row)
-        token_hint = QLabel("可用 token：actor / title / genres / number / year；用 + 与引号拼接，也支持 title.year。")
+        excl_num_row = QHBoxLayout()
+        excl_num_row.addWidget(QLabel("号码提取排除"))
+        self.number_exclude_edit = QLineEdit()
+        self.number_exclude_edit.setPlaceholderText("逗号分隔，如 xxx.com@,bbb.net")
+        excl_num_row.addWidget(self.number_exclude_edit, 1)
+        name_layout.addLayout(excl_num_row)
+        token_hint = QLabel(
+            "可用 token：title / original_title / actor / studio / director / release / year / "
+            "number / tag / genres / runtime / series / prefix / letter / season / episode / suffix；"
+            "outline 不参与路径。支持 genres/title、actor/[number]-title、title.year 与 + 引号拼接。"
+        )
         token_hint.setWordWrap(True)
         token_hint.setStyleSheet("color: #888; font-size: 12px; border: none;")
         name_layout.addWidget(token_hint)
@@ -898,10 +999,14 @@ class MainWindow(QMainWindow):
             widget.setEnabled(on)
 
     def _sync_mode(self) -> None:
-        folder = self.folder_radio.isChecked()
-        self.output_label.setEnabled(folder)
-        self.output_edit.setEnabled(folder)
-        self.output_btn.setEnabled(folder)
+        main_mode = self.main_mode_combo.currentData()
+        needs_out = main_mode in {"1", "1_keep", "2"}
+        self.output_label.setEnabled(needs_out)
+        self.output_edit.setEnabled(needs_out)
+        self.output_btn.setEnabled(needs_out)
+        soft_ok = needs_out
+        self.link_move_radio.setEnabled(soft_ok)
+        self.link_soft_radio.setEnabled(soft_ok)
 
     def _move_site(self, delta: int) -> None:
         row = self.site_list.currentRow()
@@ -973,9 +1078,12 @@ class MainWindow(QMainWindow):
             "naming_rule": self.naming_edit.text().strip(),
             "max_title_len": int(self.max_title_spin.value()),
             "delete_chars": self.delete_chars_edit.text(),
+            "number_exclude_chars": self.number_exclude_edit.text().strip(),
             "uppercase_name": self.uppercase_box.isChecked(),
             "jellyfin_mode": self.jellyfin_box.isChecked(),
             "actor_photo_kodi": True,
+            "anonymous_fill": self.anonymous_fill_box.isChecked(),
+            "actor_only_tag": self.actor_only_tag_box.isChecked(),
             "tpdb_token": self.tpdb_edit.text().strip(),
             "extrafanart": self.extrafanart_box.isChecked(),
             "trailer": self.trailer_box.isChecked(),
@@ -1006,7 +1114,10 @@ class MainWindow(QMainWindow):
         )))
         self.max_title_spin.setValue(int(mode.get("max_title_len") or 80))
         self.delete_chars_edit.setText(str(mode.get("delete_chars") or ""))
+        self.number_exclude_edit.setText(str(mode.get("number_exclude_chars") or ""))
         self.uppercase_box.setChecked(bool(mode.get("uppercase_name", False)))
+        self.anonymous_fill_box.setChecked(bool(mode.get("anonymous_fill", film_type == "other")))
+        self.actor_only_tag_box.setChecked(bool(mode.get("actor_only_tag", False)))
         self.excluded_folders_edit.setText(str(mode.get("excluded_folders") or "failed,.actors"))
         self.excluded_size_spin.setValue(float(mode.get("excluded_size_mb") or 0))
         self.tpdb_edit.setText(str(mode.get("tpdb_token") or ""))
@@ -1017,11 +1128,14 @@ class MainWindow(QMainWindow):
         self._capture_mode_from_ui()
         film_type = "general" if self.general_film_btn.isChecked() else "other"
         self._film_type = film_type
+        main_mode = self.main_mode_combo.currentData() or "4"
         return {
             "film_type": film_type,
             "media_dir": self.media_edit.text().strip(),
             "output_dir": self.output_edit.text().strip(),
-            "output_mode": "folder" if self.folder_radio.isChecked() else "beside",
+            "main_mode": main_mode,
+            "link_mode": "soft_link" if self.link_soft_radio.isChecked() else "move",
+            "output_mode": "folder" if main_mode in {"1", "1_keep", "2"} else "beside",
             "tmdb_key": self.tmdb_key_edit.text().strip(),
             "proxy": self._proxy_url(),
             "proxy_enabled": self.proxy_enabled.isChecked(),
@@ -1038,10 +1152,111 @@ class MainWindow(QMainWindow):
         }
 
     def _remember(self) -> None:
+        """No automatic disk write. Config is saved only via 保存 / 另存为."""
+
+        return
+
+    def _refresh_config_path_label(self) -> None:
+        path = get_config_path() or self._config_path
+        if path:
+            self.config_path_label.setText(f"配置：{path}")
+            self.save_btn.setEnabled(True)
+        else:
+            self.config_path_label.setText("配置：未加载（使用内存默认，关闭不写盘）")
+            self.save_btn.setEnabled(False)
+
+    def _apply_loaded_config(self, config: dict) -> None:
+        self._film_type = config.get("film_type") if config.get("film_type") in {"general", "other"} else "other"
+        self._mode_cache = {
+            "general": dict(config.get("general") or {}),
+            "other": dict(config.get("other") or {}),
+        }
+        self.general_film_btn.blockSignals(True)
+        self.other_film_btn.blockSignals(True)
+        if self._film_type == "general":
+            self.general_film_btn.setChecked(True)
+        else:
+            self.other_film_btn.setChecked(True)
+        self.general_film_btn.blockSignals(False)
+        self.other_film_btn.blockSignals(False)
+        self._sync_film_type_style()
+        self.media_edit.setText(str(config.get("media_dir") or ""))
+        self.output_edit.setText(str(config.get("output_dir") or ""))
+        mm = str(config.get("main_mode") or "4")
+        idx = next((i for i, (v, _) in enumerate(self._main_mode_items) if v == mm), 3)
+        self.main_mode_combo.setCurrentIndex(idx)
+        if config.get("link_mode") == "soft_link":
+            self.link_soft_radio.setChecked(True)
+        else:
+            self.link_move_radio.setChecked(True)
+        self.proxy_enabled.setChecked(bool(config.get("proxy_enabled", False)))
+        host, port = _parse_proxy(str(config.get("proxy") or ""))
+        self.proxy_host.setText(host)
+        self.proxy_port.setText(port)
+        self.tmdb_key_edit.setText(str(config.get("tmdb_key") or ""))
+        if config.get("emby_type") == "jellyfin":
+            self.jelly_btn.setChecked(True)
+        else:
+            self.emby_btn.setChecked(True)
+        self.emby_url_edit.setText(str(config.get("emby_url") or ""))
+        self.emby_key_edit.setText(str(config.get("emby_api_key") or ""))
+        self.emby_user_edit.setText(str(config.get("emby_user_id") or ""))
+        if config.get("actor_avatar_source") == "local":
+            self.local_avatar_radio.setChecked(True)
+        else:
+            self.gfriends_radio.setChecked(True)
+        self.actor_local_edit.setText(str(config.get("actor_local_dir") or ""))
+        self._apply_mode_to_ui(self._film_type)
+        self._sync_mode()
+        self._sync_proxy_enabled()
+        self._sync_avatar_source()
+        self._config_path = get_config_path()
+        self._refresh_config_path_label()
+
+    def _load_config_dialog(self) -> None:
+        chosen, _ = QFileDialog.getOpenFileName(
+            self, "加载配置", str(Path.home()), "JSON (*.json);;All (*.*)"
+        )
+        if not chosen:
+            return
         try:
-            save_config(self._settings())
+            config = load_config_from(chosen)
         except OSError as exc:
-            self._append(f"无法保存 config.json: {exc}")
+            QMessageBox.warning(self, "加载配置", str(exc))
+            return
+        self._apply_loaded_config(config)
+        self._append(f"已加载配置: {chosen}")
+
+    def _save_config_dialog(self) -> None:
+        path = get_config_path() or self._config_path
+        if not path:
+            self._save_as_config_dialog()
+            return
+        try:
+            save_config(self._settings(), path)
+        except OSError as exc:
+            QMessageBox.warning(self, "保存配置", str(exc))
+            return
+        self._config_path = get_config_path()
+        self._refresh_config_path_label()
+        self._append(f"已保存配置: {path}")
+
+    def _save_as_config_dialog(self) -> None:
+        chosen, _ = QFileDialog.getSaveFileName(
+            self, "另存为配置", str(Path.home() / "movie-scraper-config.json"), "JSON (*.json);;All (*.*)"
+        )
+        if not chosen:
+            return
+        if not chosen.lower().endswith(".json"):
+            chosen = chosen + ".json"
+        try:
+            save_config(self._settings(), chosen)
+        except OSError as exc:
+            QMessageBox.warning(self, "另存为", str(exc))
+            return
+        self._config_path = get_config_path()
+        self._refresh_config_path_label()
+        self._append(f"已另存为: {chosen}")
 
     def _append(self, message: str) -> None:
         self.log.appendPlainText(message)
@@ -1077,11 +1292,11 @@ class MainWindow(QMainWindow):
             self,
             "帮助",
             "本地电影元数据刮削。\n\n"
-            "1. 在「本地配置」选择一般影片/其他影片，再设目录、网站与命名规则。\n"
-            "2. 点底部绿色「开始」批量刮削；日志在「运行」。\n"
-            "3. 「自定义刮削」可只处理一个文件，或测试文件名解析。\n"
-            "4. 「演员」可连接 Emby/Jellyfin 并补全缺失头像（Gfriends 或本地库）。\n"
-            f"无登录、无到期限制。配置保存在程序旁的 config.json。\n当前版本：v{__version__}",
+            "1. 在「本地配置」选择一般影片/其他影片、主运行模式，再设目录与命名规则。\n"
+            "2. 用「加载配置 / 保存 / 另存为」管理配置；默认不写盘，exe 旁不会自动生成配置。\n"
+            "3. 点底部绿色「开始」批量刮削；也可把视频拖到「运行」日志区。\n"
+            "4. 「自定义刮削」可单文件刮削或名称提取测试；「演员」可补全 Emby/Jellyfin 头像。\n"
+            f"无登录、无到期限制。当前版本：v{__version__}",
         )
 
     def _browse_media(self) -> None:
@@ -1164,8 +1379,8 @@ class MainWindow(QMainWindow):
             self._append(f"刮削源目录不存在: {settings['media_dir']}")
             self._set_nav(0)
             return
-        if settings["output_mode"] == "folder" and not settings["output_dir"]:
-            self._append("移动模式请填写输出目录")
+        if settings.get("main_mode") in {"1", "1_keep", "2"} and not settings["output_dir"]:
+            self._append("当前主运行模式请填写输出目录")
             self._set_nav(2)
             return
         if not self._begin_job("scrape"):
@@ -1200,8 +1415,8 @@ class MainWindow(QMainWindow):
             self._append(f"文件不存在: {path}")
             return
         settings = self._settings()
-        if settings["output_mode"] == "folder" and not settings["output_dir"]:
-            self._append("移动模式请在本地配置填写输出目录")
+        if settings.get("main_mode") in {"1", "1_keep", "2"} and not settings["output_dir"]:
+            self._append("当前主运行模式请在本地配置填写输出目录")
             self._set_nav(2)
             return
         if not self._begin_job("one"):
@@ -1311,7 +1526,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self._stop.set()
-        self._remember()
+        # Do not auto-write config beside exe; only 保存/另存为 persist settings.
         event.accept()
 
 

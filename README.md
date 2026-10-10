@@ -30,7 +30,7 @@
 - **一般影片** 默认网站：TMDB、IMDb 开，Jav* 关；文件夹规则 `genres+'/'+title`，文件命名 `title.year`。
 - **其他影片** 默认网站：JavDB、JavBus、TMDB、IMDb 开；DMM、AVSOX、MGStage、FC2 关；文件夹 `actor+'/'+number`，文件 `number+'-'+title`。
 
-命名规则支持 token：`actor` / `title` / `genres` / `number` / `year`，用 `+` 与引号拼接（如 `actor+'/'+title`），也支持 `title.year`。实现为安全解析，不使用 `eval()`。
+命名规则支持 token：`title` / `original_title` / `actor` / `studio` / `director` / `release` / `year` / `number` / `tag` / `genres` / `runtime` / `series` / `prefix` / `letter` / `season` / `episode` / `suffix`（`outline` 不进路径）。支持 `genres/title`、`actor/[number]-title`、`title.year` 与 `+` 引号拼接。安全解析，不使用 `eval()`。
 
 ## 网站
 
@@ -41,7 +41,7 @@
 - TMDB 需要自己的 API Key。
 - 代理可关；开启后按 `http://地址:端口` 使用。仅支持 http/https。
 
-「旁边写文件」只在视频旁写 NFO/封面；「按规则改名并移动」按当前类型的 `location_rule` / `naming_rule` 整理到输出目录。
+「主运行模式」对齐 MDC：`1` 整理+改名移动、`1_keep` 保留原名移动、`2` 仅位置规则移动、`4` 原地刮削、`5` 原地刮削并重命名。整理方式支持移动与软链接（硬链接/strm 暂不支持）。
 
 ## 怎么运行
 
@@ -65,7 +65,7 @@ python3 -m unittest discover -s tests
 
 推送到 `master` 后 GitHub Actions 会按仓库根目录的 `VERSION` 编译单文件 `MovieScraper.exe`，并发布：
 
-- **版本化 Release**（如 `v0.3.0`）：正式归档，同一版本号不可重复发布；若 tag 已存在，工作流会失败，请先提高 `VERSION`。
+- **版本化 Release**（如 `v0.4.0`）：正式归档，同一版本号不可重复发布；若 tag 已存在，工作流会失败，请先提高 `VERSION`。
 - **`latest` Release**：始终覆盖为当前最新 exe，旧下载链接仍可用。
 
 窗口标题与「语言」页会显示当前版本。下载：
@@ -84,4 +84,4 @@ python3 -m unittest discover -s tests
 - 有剧照才写 `extrafanart/extrafanart-N.jpg`
 - 每位演员一个 `<actor><name>`；有头像时下载到 `.actors/演员名.jpg`
 
-配置保存在程序旁的 `config.json`（含 Emby/Jellyfin 与头像来源设置）。不要把含密钥的配置提交进仓库。
+配置不会在 exe 旁自动生成。界面提供「加载配置 / 保存 / 另存为」；CLI 用 `--config 路径`（可选 `--save-config`）。关闭窗口且未保存则丢弃本次修改。不要把含密钥的配置提交进仓库。

@@ -13,6 +13,7 @@ def render_nfo(
     *,
     artwork: dict[str, bool] | None = None,
     actor_files: dict[str, str] | None = None,
+    actor_only_tag: bool = False,
 ) -> str:
     """UTF-8 movie XML. Title and plot use CDATA. Text is escaped."""
 
@@ -67,7 +68,8 @@ def render_nfo(
     plain("maker", meta.studio)
     plain("label", meta.label or meta.studio)
     seen: list[str] = []
-    for value in list(meta.tags) + list(meta.genres):
+    tag_sources = list(meta.cast) if actor_only_tag else (list(meta.tags) + list(meta.genres))
+    for value in tag_sources:
         cleaned = (value or "").strip()
         if not cleaned or cleaned in seen:
             continue
@@ -104,6 +106,15 @@ def write_nfo(
     *,
     artwork: dict[str, bool] | None = None,
     actor_files: dict[str, str] | None = None,
+    actor_only_tag: bool = False,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(render_nfo(meta, artwork=artwork, actor_files=actor_files), encoding="utf-8")
+    path.write_text(
+        render_nfo(
+            meta,
+            artwork=artwork,
+            actor_files=actor_files,
+            actor_only_tag=actor_only_tag,
+        ),
+        encoding="utf-8",
+    )

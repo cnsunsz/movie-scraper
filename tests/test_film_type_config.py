@@ -63,6 +63,22 @@ class NamingRuleTests(unittest.TestCase):
         )
         self.assertEqual(folder, Path("/out") / "Action" / "Inception")
 
+    def test_shorthand_slash_and_brackets(self) -> None:
+        self.assertEqual(eval_rule("genres/title", self.values), "Action/Inception")
+        self.assertEqual(eval_rule("actor/[number]-title", self.values), "葵/[SSNI-001]-Inception")
+
+    def test_expanded_tokens(self) -> None:
+        self.meta.studio = "StudioX"
+        self.meta.directors = ["Dir"]
+        self.meta.premiered = "2010-01-02"
+        values = rule_values(self.meta, suffix="mkv")
+        self.assertEqual(values["studio"], "StudioX")
+        self.assertEqual(values["director"], "Dir")
+        self.assertEqual(values["prefix"], "SSNI")
+        self.assertEqual(values["letter"], "S")
+        self.assertEqual(values["suffix"], "mkv")
+        self.assertEqual(eval_rule("studio+'/'+number", values), "StudioX/SSNI-001")
+
 
 class SiteDefaultsByFilmTypeTests(unittest.TestCase):
     def test_general_prefers_tmdb_imdb(self) -> None:
@@ -88,6 +104,9 @@ class SiteDefaultsByFilmTypeTests(unittest.TestCase):
 
 
 class ConfigMigrateTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        app_module.set_config_path(None)
+
     def test_flat_config_migrates_into_other(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -114,39 +133,39 @@ class ConfigMigrateTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            with mock.patch.object(app_module, "CONFIG_PATH", config_path), mock.patch.object(
-                app_module, "APP_DIR", root
-            ):
-                loaded = app_module.load_config()
-                self.assertEqual(loaded["film_type"], "other")
-                self.assertIn("general", loaded)
-                self.assertIn("other", loaded)
-                other_sites = {item["name"]: item["enabled"] for item in loaded["other"]["sites"]}
-                self.assertTrue(other_sites["javbus"])
-                self.assertFalse(other_sites["javdb"])
-                general_enabled = enabled_names(loaded["general"]["sites"])
-                self.assertEqual(general_enabled[:2], ["tmdb", "imdb"])
-                self.assertEqual(loaded["tmdb_key"], "secret-key")
-                self.assertFalse(loaded["skip_existing_nfo"])
-                # Flattened active mode mirrors other
-                self.assertEqual(loaded["sites"][0]["name"], "javbus")
+            loaded = app_module.load_config_from(config_path)
+            self.assertEqual(loaded["film_type"], "other")
+            self.assertEqual(loaded["main_mode"], "1")
+            self.assertIn("general", loaded)
+            self.assertIn("other", loaded)
+            other_sites = {item["name"]: item["enabled"] for item in loaded["other"]["sites"]}
+            self.assertTrue(other_sites["javbus"])
+            self.assertFalse(other_sites["javdb"])
+            general_enabled = enabled_names(loaded["general"]["sites"])
+            self.assertEqual(general_enabled[:2], ["tmdb", "imdb"])
+            self.assertEqual(loaded["tmdb_key"], "secret-key")
+            self.assertFalse(loaded["skip_existing_nfo"])
+            self.assertEqual(loaded["sites"][0]["name"], "javbus")
 
-                app_module.save_config(
-                    {
-                        "film_type": "general",
-                        "media_dir": str(root / "media2"),
-                        "general": loaded["general"],
-                        "other": loaded["other"],
-                    }
-                )
-                again = app_module.load_config()
-                raw = json.loads(config_path.read_text(encoding="utf-8"))
+            out = root / "saved.json"
+            app_module.save_config(
+                {
+                    "film_type": "general",
+                    "media_dir": str(root / "media2"),
+                    "main_mode": "4",
+                    "general": loaded["general"],
+                    "other": loaded["other"],
+                },
+                out,
+            )
+            again = app_module.load_config_from(out)
+            raw = json.loads(out.read_text(encoding="utf-8"))
         self.assertEqual(again["film_type"], "general")
         self.assertEqual(again["media_dir"], str(root / "media2"))
+        self.assertEqual(again["main_mode"], "4")
         self.assertIn("general", raw)
         self.assertIn("other", raw)
         self.assertNotIn("javdb_cookie", raw)
-        # Nested other kept previous site order preference
         other_names = [item["name"] for item in raw["other"]["sites"]]
         self.assertEqual(other_names[0], "javbus")
 
@@ -154,38 +173,37 @@ class ConfigMigrateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             config_path = root / "config.json"
-            with mock.patch.object(app_module, "CONFIG_PATH", config_path), mock.patch.object(
-                app_module, "APP_DIR", root
-            ):
-                app_module.save_config(
-                    {
-                        "film_type": "general",
-                        "media_dir": str(root / "m"),
-                        "output_dir": str(root / "o"),
-                        "output_mode": "folder",
-                        "tmdb_key": "k",
-                        "proxy": "http://127.0.0.1:1",
-                        "proxy_enabled": True,
-                        "general": {
-                            "sites": default_sites("general"),
-                            "location_rule": "genres+'/'+title",
-                            "naming_rule": "title.year",
-                            "translate_plot": False,
-                        },
-                        "other": {
-                            "sites": default_sites("other"),
-                            "location_rule": "actor+'/'+number",
-                            "naming_rule": "number+'-'+title",
-                            "translate_plot": True,
-                            "tpdb_token": "",
-                        },
-                    }
-                )
-                loaded = app_module.load_config()
+            app_module.save_config(
+                {
+                    "film_type": "general",
+                    "media_dir": str(root / "m"),
+                    "output_dir": str(root / "o"),
+                    "main_mode": "1",
+                    "tmdb_key": "k",
+                    "proxy": "http://127.0.0.1:1",
+                    "proxy_enabled": True,
+                    "general": {
+                        "sites": default_sites("general"),
+                        "location_rule": "genres+'/'+title",
+                        "naming_rule": "title.year",
+                        "translate_plot": False,
+                    },
+                    "other": {
+                        "sites": default_sites("other"),
+                        "location_rule": "actor+'/'+number",
+                        "naming_rule": "number+'-'+title",
+                        "translate_plot": True,
+                        "tpdb_token": "",
+                    },
+                },
+                config_path,
+            )
+            loaded = app_module.load_config_from(config_path)
         self.assertEqual(loaded["film_type"], "general")
         self.assertEqual(loaded["general"]["naming_rule"], "title.year")
         self.assertEqual(loaded["other"]["naming_rule"], "number+'-'+title")
         self.assertEqual(enabled_names(loaded["sites"])[:2], ["tmdb", "imdb"])
+        self.assertEqual(loaded["main_mode"], "1")
 
 
 if __name__ == "__main__":

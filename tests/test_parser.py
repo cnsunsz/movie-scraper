@@ -134,6 +134,10 @@ class ParserTests(unittest.TestCase):
         parsed = parse_filename(r"D:\films\SSNI-001.MKV")
         self.assertEqual(parsed.code, "SSNI-001")
 
+    def test_exclude_chars_strips_noise(self) -> None:
+        parsed = parse_filename("xxx.com@SSNI-001.mp4", exclude_chars="xxx.com@")
+        self.assertEqual(parsed.code, "SSNI-001")
+
 
 if __name__ == "__main__":
     unittest.main()
