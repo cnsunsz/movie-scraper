@@ -27,7 +27,8 @@ SITE_LABELS = {
     "fc2": "FC2",
 }
 
-DEFAULT_ENABLED = {
+# 「其他影片」：番号站优先（与 0.2.x 默认一致）
+DEFAULT_ENABLED_OTHER = {
     "javdb": True,
     "javbus": True,
     "tmdb": True,
@@ -37,20 +38,62 @@ DEFAULT_ENABLED = {
     "mgstage": False,
     "fc2": False,
 }
+DEFAULT_ORDER_OTHER = (
+    "javdb",
+    "javbus",
+    "tmdb",
+    "imdb",
+    "dmm",
+    "avsox",
+    "mgstage",
+    "fc2",
+)
+
+# 「一般影片」：TMDB / IMDb 优先，番号站默认关闭
+DEFAULT_ENABLED_GENERAL = {
+    "javdb": False,
+    "javbus": False,
+    "tmdb": True,
+    "imdb": True,
+    "dmm": False,
+    "avsox": False,
+    "mgstage": False,
+    "fc2": False,
+}
+DEFAULT_ORDER_GENERAL = (
+    "tmdb",
+    "imdb",
+    "javdb",
+    "javbus",
+    "dmm",
+    "avsox",
+    "mgstage",
+    "fc2",
+)
+
+# 兼容旧名
+DEFAULT_ENABLED = DEFAULT_ENABLED_OTHER
 
 
-def default_sites() -> list[dict]:
-    return [{"name": name, "enabled": DEFAULT_ENABLED[name]} for name in SOURCE_NAMES]
+def default_sites(film_type: str = "other") -> list[dict]:
+    if film_type == "general":
+        order, enabled = DEFAULT_ORDER_GENERAL, DEFAULT_ENABLED_GENERAL
+    else:
+        order, enabled = DEFAULT_ORDER_OTHER, DEFAULT_ENABLED_OTHER
+    return [{"name": name, "enabled": bool(enabled[name])} for name in order]
 
 
 def normalize_sites(
     value,
     legacy_enabled: dict | None = None,
     legacy_priority: str | None = None,
+    *,
+    film_type: str = "other",
 ) -> list[dict]:
     """Ordered ``{name, enabled}`` list. Old priority text and checkboxes migrate in."""
 
-    enabled = dict(DEFAULT_ENABLED)
+    base = default_sites(film_type)
+    enabled = {item["name"]: item["enabled"] for item in base}
     if legacy_enabled:
         for name, flag in legacy_enabled.items():
             if name in enabled:
@@ -71,6 +114,9 @@ def normalize_sites(
             name = token.strip().lower()
             if name in enabled and name not in order:
                 order.append(name)
+    for name in (item["name"] for item in base):
+        if name not in order:
+            order.append(name)
     for name in SOURCE_NAMES:
         if name not in order:
             order.append(name)

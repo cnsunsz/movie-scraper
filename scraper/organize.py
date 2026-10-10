@@ -27,6 +27,7 @@ from scraper.mgstage import lookup_code as mgstage_lookup
 from scraper.net import classify_proxy
 from scraper.nfo import write_nfo
 from scraper.parser import VIDEO_EXTENSIONS, parse_filename
+from scraper.naming import apply_delete_chars, eval_rule, rule_values, truncate_title
 from scraper.sources import CODE_SITES, SITE_LABELS, TITLE_SITES, enabled_names, normalize_sites
 from scraper.tmdb import lookup as tmdb_lookup
 from scraper.translate import has_cjk, translate_to_zh
@@ -42,25 +43,45 @@ ProgressFn = Callable[[int, int, str], None]
 StopFn = Callable[[], bool]
 
 
-def list_videos(root: Path) -> list[Path]:
-    """Video files under ``root``, skipping hidden, ``failed``, and ``.actors`` dirs."""
+def list_videos(
+    root: Path,
+    *,
+    excluded_folders: str | None = None,
+    excluded_size_mb: float = 0,
+) -> list[Path]:
+    """Video files under ``root``, skipping hidden / failed / .actors and config exclusions."""
 
     root = Path(root)
     found: list[Path] = []
     if not root.is_dir():
         return found
+    skip = {name.lower() for name in SKIP_DIR_NAMES}
+    if excluded_folders:
+        for token in str(excluded_folders).split(","):
+            name = token.strip().lower()
+            if name:
+                skip.add(name)
+    min_bytes = int(float(excluded_size_mb or 0) * 1024 * 1024)
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [
             name
             for name in dirnames
-            if not name.startswith(".") and name.lower() not in SKIP_DIR_NAMES
+            if not name.startswith(".") and name.lower() not in skip
         ]
         for filename in filenames:
             if filename.startswith("."):
                 continue
             extension = os.path.splitext(filename)[1].lower().lstrip(".")
-            if extension in VIDEO_EXTENSIONS:
-                found.append(Path(dirpath) / filename)
+            if extension not in VIDEO_EXTENSIONS:
+                continue
+            path = Path(dirpath) / filename
+            if min_bytes > 0:
+                try:
+                    if path.stat().st_size < min_bytes:
+                        continue
+                except OSError:
+                    continue
+            found.append(path)
     found.sort()
     return found
 
@@ -103,7 +124,13 @@ def scrape(
         log(warning)
     options["proxy"] = proxy_url
 
-    files = list_videos(media_dir)
+    film_label = "一般影片" if options.get("film_type") == "general" else "其他影片"
+    log(f"影片类型: {film_label}")
+    files = list_videos(
+        media_dir,
+        excluded_folders=options.get("excluded_folders"),
+        excluded_size_mb=float(options.get("excluded_size_mb") or 0),
+    )
     total = len(files)
     order = enabled_names(options.get("sites"))
     log("数据源顺序: " + (", ".join(_LABELS[name] for name in order) if order else "（无）"))
@@ -191,20 +218,39 @@ def scrape_one(
 
 
 def _options(use_imdb: bool, sources: dict | None) -> dict:
+    film_type = "other"
+    if isinstance(sources, dict) and sources.get("film_type") in {"general", "other"}:
+        film_type = sources["film_type"]
     if sources is None:
         sites = normalize_sites([
             {"name": name, "enabled": name == "imdb" and bool(use_imdb)}
             for name in ("javdb", "javbus", "tmdb", "imdb", "dmm", "avsox", "mgstage", "fc2")
-        ])
+        ], film_type=film_type)
         return {
+            "film_type": film_type,
             "sites": sites,
             "tmdb_key": "",
             "proxy": "",
             "skip_existing_nfo": False,
             "translate_plot": False,
+            "download_images": True,
+            "download_missing_only": False,
+            "print_nfo": True,
+            "nfo_skip_days": 0,
+            "excluded_folders": "failed,.actors",
+            "excluded_size_mb": 0,
+            "location_rule": "actor+'/'+number" if film_type == "other" else "genres+'/'+title",
+            "naming_rule": "number+'-'+title" if film_type == "other" else "title.year",
+            "max_title_len": 80,
+            "delete_chars": "",
+            "uppercase_name": False,
+            "extrafanart": True,
+            "trailer": False,
+            "storyline": False,
+            "tpdb_token": "",
         }
     if isinstance(sources.get("sites"), list):
-        sites = normalize_sites(sources.get("sites"))
+        sites = normalize_sites(sources.get("sites"), film_type=film_type)
     else:
         legacy = {}
         for key in ("javdb", "tmdb", "imdb"):
@@ -212,14 +258,47 @@ def _options(use_imdb: bool, sources: dict | None) -> dict:
                 legacy[key] = bool(sources.get(key))
         if "imdb" not in legacy:
             legacy["imdb"] = bool(use_imdb)
-        sites = normalize_sites(None, legacy, sources.get("priority") if isinstance(sources.get("priority"), str) else None)
+        sites = normalize_sites(
+            None,
+            legacy,
+            sources.get("priority") if isinstance(sources.get("priority"), str) else None,
+            film_type=film_type,
+        )
+    default_location = "genres+'/'+title" if film_type == "general" else "actor+'/'+number"
+    default_naming = "title.year" if film_type == "general" else "number+'-'+title"
     return {
+        "film_type": film_type,
         "sites": sites,
         "tmdb_key": str(sources.get("tmdb_key") or ""),
         "proxy": str(sources.get("proxy") or ""),
         "skip_existing_nfo": bool(sources.get("skip_existing_nfo", True)),
-        "translate_plot": bool(sources.get("translate_plot", True)),
+        "translate_plot": bool(sources.get("translate_plot", film_type != "general")),
+        "download_images": bool(sources.get("download_images", True)),
+        "download_missing_only": bool(sources.get("download_missing_only", False)),
+        "print_nfo": bool(sources.get("print_nfo", True)),
+        "nfo_skip_days": int(sources.get("nfo_skip_days") or 0),
+        "excluded_folders": str(sources.get("excluded_folders") or "failed,.actors"),
+        "excluded_size_mb": float(sources.get("excluded_size_mb") or 0),
+        "location_rule": str(sources.get("location_rule") or default_location),
+        "naming_rule": str(sources.get("naming_rule") or default_naming),
+        "max_title_len": int(sources.get("max_title_len") or 80),
+        "delete_chars": str(sources.get("delete_chars") or ""),
+        "uppercase_name": bool(sources.get("uppercase_name", False)),
+        "extrafanart": bool(sources.get("extrafanart", True)),
+        "trailer": bool(sources.get("trailer", False)),
+        "storyline": bool(sources.get("storyline", False)),
+        "tpdb_token": str(sources.get("tpdb_token") or ""),
     }
+
+
+def _nfo_fresh(path: Path, skip_days: int) -> bool:
+    if skip_days <= 0 or not path.exists():
+        return False
+    try:
+        age = time.time() - path.stat().st_mtime
+    except OSError:
+        return False
+    return age < skip_days * 86400
 
 
 def _process_one(
@@ -235,8 +314,18 @@ def _process_one(
         f"{src.name} -> IMDb {parsed.imdb_id or '-'} / "
         f"番号 {parsed.code or '-'} / 标题 {parsed.title or '-'}"
     )
+    if options.get("tpdb_token"):
+        log("TPDB Token 已配置（刮削器暂未接入，已忽略）")
+    if options.get("trailer"):
+        log("预告片开关已开：暂未实现")
+    if options.get("storyline"):
+        log("剧情简介扩展开关已开：暂未实现")
+
     if options["skip_existing_nfo"] and mode == "beside" and src.with_suffix(".nfo").exists():
         log(f"已有 NFO，跳过 {src.name}")
+        return False
+    if mode == "beside" and _nfo_fresh(src.with_suffix(".nfo"), int(options.get("nfo_skip_days") or 0)):
+        log(f"NFO 未过期（nfo_skip_days），跳过 {src.name}")
         return False
 
     meta, used_network = _lookup(parsed, options, log)
@@ -267,12 +356,29 @@ def _process_one(
         if output_dir is None:
             log("缺少输出目录，跳过移动")
             return used_network
-        folder = movie_folder(output_dir, meta)
+        folder = movie_folder(
+            output_dir,
+            meta,
+            location_rule=options.get("location_rule") or "",
+            delete_chars=options.get("delete_chars") or "",
+            uppercase_name=bool(options.get("uppercase_name")),
+            max_title_len=int(options.get("max_title_len") or 80),
+        )
         folder.mkdir(parents=True, exist_ok=True)
-        destination = folder / video_filename(src, meta)
+        destination = folder / video_filename(
+            src,
+            meta,
+            naming_rule=options.get("naming_rule") or "",
+            delete_chars=options.get("delete_chars") or "",
+            uppercase_name=bool(options.get("uppercase_name")),
+            max_title_len=int(options.get("max_title_len") or 80),
+        )
         nfo_path = destination.with_suffix(".nfo")
         if options["skip_existing_nfo"] and nfo_path.exists():
             log(f"已有 NFO，跳过 {nfo_path}")
+            return used_network
+        if _nfo_fresh(nfo_path, int(options.get("nfo_skip_days") or 0)):
+            log(f"NFO 未过期（nfo_skip_days），跳过 {nfo_path}")
             return used_network
         if destination.resolve() == src.resolve():
             log(f"输出路径与原文件相同，不移动: {destination}")
@@ -288,41 +394,111 @@ def _process_one(
         nfo_path = src.with_suffix(".nfo")
         artwork_dir = src.parent
 
-    artwork = _save_artwork(meta, artwork_dir, options["proxy"], log)
-    actor_files = _save_actor_photos(meta, artwork_dir, options["proxy"], log)
-    write_nfo(nfo_path, meta, artwork=artwork, actor_files=actor_files)
-    log(f"写入 {nfo_path.name}")
+    if options.get("download_images", True):
+        artwork = _save_artwork(
+            meta,
+            artwork_dir,
+            options["proxy"],
+            log,
+            missing_only=bool(options.get("download_missing_only")),
+            extrafanart=bool(options.get("extrafanart", True)),
+        )
+        actor_files = _save_actor_photos(meta, artwork_dir, options["proxy"], log)
+    else:
+        log("已关闭下载图片")
+        artwork = {
+            "poster": (artwork_dir / "poster.jpg").exists(),
+            "fanart": (artwork_dir / "fanart.jpg").exists(),
+            "thumb": (artwork_dir / "thumb.jpg").exists(),
+        }
+        actor_files = {}
+    if options.get("print_nfo", True):
+        write_nfo(nfo_path, meta, artwork=artwork, actor_files=actor_files)
+        log(f"写入 {nfo_path.name}")
+    else:
+        log("已关闭写入 NFO")
     return used_network
 
 
 
-def video_filename(src: Path, meta: MovieMetadata) -> str:
-    """``番号-标题.ext``. Title already starting with the code is not repeated."""
+def video_filename(
+    src: Path,
+    meta: MovieMetadata,
+    *,
+    naming_rule: str = "",
+    delete_chars: str = "",
+    uppercase_name: bool = False,
+    max_title_len: int = 80,
+) -> str:
+    """Build video stem from ``naming_rule`` (default ``number-title``)."""
 
-    code = (meta.code or "").strip()
-    title = (meta.title or "").strip()
-    if code and title and not title.upper().startswith(code.upper()):
-        stem = f"{code}-{title}"
+    values = rule_values(meta)
+    if uppercase_name and values.get("number"):
+        values["number"] = values["number"].upper()
+    rule = (naming_rule or "").strip() or "number+'-'+title"
+    code = (values.get("number") or "").strip()
+    title = (values.get("title") or "").strip()
+    # When the title already starts with the code, avoid number+title doubling
+    # (legacy behavior: use the title alone).
+    rule_compact = rule.replace(" ", "").lower()
+    if (
+        code
+        and title
+        and title.upper().startswith(code.upper())
+        and "number" in rule_compact
+        and "title" in rule_compact
+    ):
+        stem = eval_rule("title", values, default="") or title
     else:
-        stem = title or code or src.stem
+        stem = eval_rule(rule, values, default="")
+    if not stem:
+        if code and title and not title.upper().startswith(code.upper()):
+            stem = f"{code}-{title}"
+        else:
+            stem = title or code or src.stem
+    stem = apply_delete_chars(stem, delete_chars)
     stem = sanitize_folder_name(stem)
-    if len(stem) > 80:
-        stem = stem[:80].rstrip(" .-")
+    stem = truncate_title(stem, max_title_len if max_title_len > 0 else 80)
     return (stem or src.stem) + src.suffix
 
 
-def movie_folder(output_dir: Path, meta: MovieMetadata) -> Path:
-    """``输出/第一位演员/番号或标题``，没有演员时是 ``输出/番号或标题``。"""
+def movie_folder(
+    output_dir: Path,
+    meta: MovieMetadata,
+    *,
+    location_rule: str = "",
+    delete_chars: str = "",
+    uppercase_name: bool = False,
+    max_title_len: int = 80,
+) -> Path:
+    """Folder under ``output_dir`` from ``location_rule`` (default actor/number)."""
 
-    title = sanitize_folder_name(meta.code or meta.title or "未知")
-    actor = ""
-    if meta.cast:
-        actor = sanitize_folder_name(meta.cast[0])
-        if actor == "未知":
-            actor = ""
-    if actor:
-        return Path(output_dir) / actor / title
-    return Path(output_dir) / title
+    values = rule_values(meta)
+    if uppercase_name and values.get("number"):
+        values["number"] = values["number"].upper()
+    rule = (location_rule or "").strip() or "actor+'/'+number"
+    relative = eval_rule(rule, values, default="")
+    if not relative:
+        # Legacy fallback: actor/number-or-title
+        title = sanitize_folder_name(meta.code or meta.title or "未知")
+        actor = ""
+        if meta.cast:
+            actor = sanitize_folder_name(meta.cast[0])
+            if actor == "未知":
+                actor = ""
+        relative = f"{actor}/{title}" if actor else title
+    relative = apply_delete_chars(relative, delete_chars)
+    parts = []
+    for part in relative.replace("\\", "/").split("/"):
+        cleaned = sanitize_folder_name(part)
+        cleaned = truncate_title(cleaned, max_title_len if max_title_len > 0 else 120)
+        if cleaned and cleaned != "未知":
+            parts.append(cleaned)
+        elif cleaned == "未知" and not parts:
+            parts.append(cleaned)
+    if not parts:
+        parts = [sanitize_folder_name(meta.code or meta.title or "未知")]
+    return Path(output_dir).joinpath(*parts)
 
 
 def _lookup(parsed, options: dict, log: LogFn) -> tuple[MovieMetadata | None, bool]:
@@ -471,33 +647,57 @@ def _actor_filename(name: str, url: str, used: set[str]) -> str:
     return filename
 
 
-def _save_artwork(meta: MovieMetadata, folder: Path, proxy: str | None, log: LogFn) -> dict[str, bool]:
+def _save_artwork(
+    meta: MovieMetadata,
+    folder: Path,
+    proxy: str | None,
+    log: LogFn,
+    *,
+    missing_only: bool = False,
+    extrafanart: bool = True,
+) -> dict[str, bool]:
     poster = folder / "poster.jpg"
     fanart = folder / "fanart.jpg"
     thumb = folder / "thumb.jpg"
     flags = {"poster": False, "fanart": False, "thumb": False}
-    if meta.poster_url:
+
+    def need(path: Path) -> bool:
+        return not (missing_only and path.exists())
+
+    if meta.poster_url and need(poster):
         flags["poster"] = _save_image(meta.poster_url, poster, proxy, log)
-    if meta.fanart_url and meta.fanart_url != meta.poster_url:
+    elif poster.exists():
+        flags["poster"] = True
+    if meta.fanart_url and meta.fanart_url != meta.poster_url and need(fanart):
         flags["fanart"] = _save_image(meta.fanart_url, fanart, proxy, log)
     elif flags["poster"] or poster.exists():
-        flags["fanart"] = _copy_image(poster, fanart, log)
-    if meta.thumb_url and meta.thumb_url not in {meta.poster_url, meta.fanart_url}:
+        if need(fanart):
+            flags["fanart"] = _copy_image(poster, fanart, log)
+        else:
+            flags["fanart"] = fanart.exists()
+    if meta.thumb_url and meta.thumb_url not in {meta.poster_url, meta.fanart_url} and need(thumb):
         flags["thumb"] = _save_image(meta.thumb_url, thumb, proxy, log)
     elif flags["poster"] or poster.exists():
-        flags["thumb"] = _copy_image(poster, thumb, log)
-    stills = [url for url in (meta.extra_stills or []) if url][:20]
-    if stills:
-        extra = folder / "extrafanart"
-        extra.mkdir(exist_ok=True)
-        saved = 0
-        for index, url in enumerate(stills, start=1):
-            path = extra / f"extrafanart-{index}.jpg"
-            if _save_image(url, path, proxy, log):
-                saved += 1
-        if saved == 0 and not any(extra.iterdir()):
-            extra.rmdir()
-            log("没有下载到剧照，不保留空的 extrafanart")
+        if need(thumb):
+            flags["thumb"] = _copy_image(poster, thumb, log)
+        else:
+            flags["thumb"] = thumb.exists()
+    if extrafanart:
+        stills = [url for url in (meta.extra_stills or []) if url][:20]
+        if stills:
+            extra = folder / "extrafanart"
+            extra.mkdir(exist_ok=True)
+            saved = 0
+            for index, url in enumerate(stills, start=1):
+                path = extra / f"extrafanart-{index}.jpg"
+                if missing_only and path.exists():
+                    saved += 1
+                    continue
+                if _save_image(url, path, proxy, log):
+                    saved += 1
+            if saved == 0 and not any(extra.iterdir()):
+                extra.rmdir()
+                log("没有下载到剧照，不保留空的 extrafanart")
     return flags
 
 

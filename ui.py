@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
     QCheckBox,
+    QDoubleSpinBox,
     QFileDialog,
     QFrame,
     QGridLayout,
@@ -53,6 +54,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QRadioButton,
     QScrollArea,
+    QSpinBox,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -60,7 +62,7 @@ from PySide6.QtWidgets import (
 
 from app import APP_DIR, __version__, effective_proxy, load_config, run_job, run_one_file, save_config
 from scraper.parser import parse_filename
-from scraper.sources import SITE_LABELS, normalize_sites
+from scraper.sources import SITE_LABELS, default_sites, normalize_sites
 
 
 def _pick_font() -> QFont:
@@ -254,6 +256,11 @@ class MainWindow(QMainWindow):
         self._job_kind = ""
 
         config = load_config()
+        self._film_type = config.get("film_type") if config.get("film_type") in {"general", "other"} else "other"
+        self._mode_cache = {
+            "general": dict(config.get("general") or {}),
+            "other": dict(config.get("other") or {}),
+        }
         central = QWidget()
         central.setObjectName("central")
         self.setCentralWidget(central)
@@ -285,6 +292,7 @@ class MainWindow(QMainWindow):
         self._sync_mode()
         self._sync_proxy_enabled()
         self._sync_avatar_source()
+        self._sync_film_type_style()
         self._set_nav(0)
 
         self._timer = QTimer(self)
@@ -438,17 +446,49 @@ class MainWindow(QMainWindow):
         outer.addWidget(scroll)
         body = QWidget()
         scroll.setWidget(body)
-        grid = QGridLayout(body)
-        grid.setContentsMargins(20, 16, 20, 16)
+        root = QVBoxLayout(body)
+        root.setContentsMargins(20, 16, 20, 16)
+        root.setSpacing(16)
+
+        # Film type toggle
+        type_card, type_layout = self._card("影片类型")
+        type_row = QHBoxLayout()
+        type_row.addWidget(QLabel("刮削配置"))
+        self.general_film_btn = QPushButton("一般影片")
+        self.other_film_btn = QPushButton("其他影片")
+        for btn in (self.general_film_btn, self.other_film_btn):
+            btn.setCheckable(True)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._film_group = QButtonGroup(self)
+        self._film_group.setExclusive(True)
+        self._film_group.addButton(self.general_film_btn)
+        self._film_group.addButton(self.other_film_btn)
+        if self._film_type == "general":
+            self.general_film_btn.setChecked(True)
+        else:
+            self.other_film_btn.setChecked(True)
+        self.general_film_btn.toggled.connect(self._on_film_type_toggled)
+        type_row.addWidget(self.general_film_btn)
+        type_row.addWidget(self.other_film_btn)
+        type_row.addStretch(1)
+        type_layout.addLayout(type_row)
+        type_hint = QLabel("切换后加载该类型的网站顺序、命名规则与翻译等设置；目录与代理为共用。")
+        type_hint.setWordWrap(True)
+        type_hint.setStyleSheet("color: #888; font-size: 12px; border: none;")
+        type_layout.addWidget(type_hint)
+        root.addWidget(type_card)
+
+        grid = QGridLayout()
         grid.setHorizontalSpacing(16)
         grid.setVerticalSpacing(16)
+        root.addLayout(grid)
 
-        # Directory
-        dir_card, dir_layout = self._card("目录配置")
+        # Directory (shared)
+        dir_card, dir_layout = self._card("目录配置（共用）")
         media_row = QHBoxLayout()
         media_row.addWidget(QLabel("刮削源目录"))
         self.media_edit = QLineEdit(str(config.get("media_dir") or ""))
-        self.media_edit.setPlaceholderText("对应 Movie_Data_Capture 的 source_folder")
+        self.media_edit.setPlaceholderText("视频所在目录")
         media_row.addWidget(self.media_edit, 1)
         media_btn = QPushButton("浏览")
         media_btn.setStyleSheet("QPushButton { background: white; border: 1px solid #D0D0D0; padding: 6px 12px; border-radius: 4px; }")
@@ -459,7 +499,7 @@ class MainWindow(QMainWindow):
         mode_row = QHBoxLayout()
         mode_row.addWidget(QLabel("输出模式"))
         self.beside_radio = QRadioButton("旁边写文件")
-        self.folder_radio = QRadioButton("按演员/标题改名并移动")
+        self.folder_radio = QRadioButton("按规则改名并移动")
         self._modes = QButtonGroup(self)
         self._modes.addButton(self.beside_radio)
         self._modes.addButton(self.folder_radio)
@@ -477,7 +517,7 @@ class MainWindow(QMainWindow):
         self.output_label = QLabel("输出目录")
         output_row.addWidget(self.output_label)
         self.output_edit = QLineEdit(str(config.get("output_dir") or ""))
-        self.output_edit.setPlaceholderText("success_output_folder / 演员/番号-标题")
+        self.output_edit.setPlaceholderText("移动模式的输出根目录")
         output_row.addWidget(self.output_edit, 1)
         self.output_btn = QPushButton("浏览")
         self.output_btn.setStyleSheet("QPushButton { background: white; border: 1px solid #D0D0D0; padding: 6px 12px; border-radius: 4px; }")
@@ -486,9 +526,8 @@ class MainWindow(QMainWindow):
         dir_layout.addLayout(output_row)
         grid.addWidget(dir_card, 0, 0)
 
-        # Subtitle / general right column top: sites go left-full later
-        # Network
-        net_card, net_layout = self._card("网络与代理")
+        # Network (shared)
+        net_card, net_layout = self._card("网络与代理（共用）")
         proxy_top = QHBoxLayout()
         self.proxy_enabled = QCheckBox("启用代理")
         self.proxy_enabled.setChecked(bool(config.get("proxy_enabled", False)))
@@ -517,40 +556,82 @@ class MainWindow(QMainWindow):
         )
         test_proxy.clicked.connect(self._test_proxy_message)
         net_layout.addWidget(test_proxy)
-        grid.addWidget(net_card, 1, 0)
+        key_row = QHBoxLayout()
+        key_row.addWidget(QLabel("TMDB API Key"))
+        self.tmdb_key_edit = QLineEdit(str(config.get("tmdb_key") or ""))
+        self.tmdb_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.tmdb_key_edit.setPlaceholderText("没有 Key 时 TMDB 会跳过")
+        key_row.addWidget(self.tmdb_key_edit, 1)
+        net_layout.addLayout(key_row)
+        grid.addWidget(net_card, 0, 1)
 
-        # General
-        gen_card, gen_layout = self._card("常规设置")
+        # Common (per-mode)
+        common_card, common_layout = self._card("常规 Common")
         self.skip_nfo_box = QCheckBox("跳过已有 NFO")
-        self.skip_nfo_box.setChecked(bool(config.get("skip_existing_nfo", True)))
-        self.translate_box = QCheckBox("简介翻译为中文")
-        self.translate_box.setChecked(bool(config.get("translate_plot", True)))
-        gen_layout.addWidget(self.skip_nfo_box)
-        gen_layout.addWidget(self.translate_box)
-        hint = QLabel("对应 Movie_Data_Capture 的 nfo 跳过与 translate_to_sc / translate 思路。")
-        hint.setWordWrap(True)
-        hint.setStyleSheet("color: #888; font-size: 12px; border: none;")
-        gen_layout.addWidget(hint)
-        gen_layout.addStretch(1)
-        grid.addWidget(gen_card, 1, 1)
+        self.download_images_box = QCheckBox("下载图片")
+        self.download_missing_box = QCheckBox("仅下载缺失图片")
+        self.print_nfo_box = QCheckBox("写入 NFO")
+        self.extrafanart_box = QCheckBox("下载剧照 extrafanart")
+        self.trailer_box = QCheckBox("预告片（暂未实现）")
+        self.storyline_box = QCheckBox("剧情扩展（暂未实现）")
+        for box in (
+            self.skip_nfo_box,
+            self.download_images_box,
+            self.download_missing_box,
+            self.print_nfo_box,
+            self.extrafanart_box,
+            self.trailer_box,
+            self.storyline_box,
+        ):
+            common_layout.addWidget(box)
+        sleep_row = QHBoxLayout()
+        sleep_row.addWidget(QLabel("文件间隔（秒）"))
+        self.sleep_spin = QDoubleSpinBox()
+        self.sleep_spin.setRange(0, 60)
+        self.sleep_spin.setSingleStep(0.1)
+        self.sleep_spin.setDecimals(1)
+        sleep_row.addWidget(self.sleep_spin)
+        sleep_row.addStretch(1)
+        common_layout.addLayout(sleep_row)
+        nfo_days_row = QHBoxLayout()
+        nfo_days_row.addWidget(QLabel("NFO 跳过天数"))
+        self.nfo_skip_spin = QSpinBox()
+        self.nfo_skip_spin.setRange(0, 3650)
+        nfo_days_row.addWidget(self.nfo_skip_spin)
+        nfo_days_row.addWidget(QLabel("0=不按天数跳过"))
+        nfo_days_row.addStretch(1)
+        common_layout.addLayout(nfo_days_row)
+        skip_note = QLabel("水印 / 人脸裁剪 / 后端托管 / OpenAI：本程序不提供。")
+        skip_note.setWordWrap(True)
+        skip_note.setStyleSheet("color: #888; font-size: 12px; border: none;")
+        common_layout.addWidget(skip_note)
+        grid.addWidget(common_card, 1, 0)
 
-        # Sites (full width bottom / right column spanning)
-        sites_card, sites_layout = self._card("网站优先级（本地配置）")
+        # Translation / metadata extras
+        meta_card, meta_layout = self._card("元数据 / 翻译")
+        self.translate_box = QCheckBox("简介翻译为中文")
+        meta_layout.addWidget(self.translate_box)
+        self.jellyfin_box = QCheckBox("Jellyfin 模式（标记，行为与 Emby 兼容写入）")
+        meta_layout.addWidget(self.jellyfin_box)
+        self.kodi_actor_box = QCheckBox("Kodi 演员图片目录习惯（.actors）")
+        self.kodi_actor_box.setChecked(True)
+        self.kodi_actor_box.setEnabled(False)
+        meta_layout.addWidget(self.kodi_actor_box)
+        meta_hint = QLabel("一般影片默认可不翻译；其他影片可开翻译。演员头像仍写入 .actors。")
+        meta_hint.setWordWrap(True)
+        meta_hint.setStyleSheet("color: #888; font-size: 12px; border: none;")
+        meta_layout.addWidget(meta_hint)
+        meta_layout.addStretch(1)
+        grid.addWidget(meta_card, 1, 1)
+
+        # Sites
+        sites_card, sites_layout = self._card("搜索网站（本类型）")
         sites_hint = QLabel("勾选后按从上到下顺序查询；严格匹配，对不上就换下一个。")
         sites_hint.setWordWrap(True)
         sites_hint.setStyleSheet("color: #888; font-size: 12px; border: none;")
         sites_layout.addWidget(sites_hint)
         sites_row = QHBoxLayout()
         self.site_list = QListWidget()
-        for item in normalize_sites(config.get("sites")):
-            label = SITE_LABELS.get(item["name"], item["name"])
-            row_item = QListWidgetItem(label)
-            row_item.setData(Qt.ItemDataRole.UserRole, item["name"])
-            row_item.setFlags(row_item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            row_item.setCheckState(
-                Qt.CheckState.Checked if item["enabled"] else Qt.CheckState.Unchecked
-            )
-            self.site_list.addItem(row_item)
         sites_row.addWidget(self.site_list, 1)
         move_col = QVBoxLayout()
         up = QPushButton("上移")
@@ -566,18 +647,75 @@ class MainWindow(QMainWindow):
         move_col.addStretch(1)
         sites_row.addLayout(move_col)
         sites_layout.addLayout(sites_row)
-        key_row = QHBoxLayout()
-        key_row.addWidget(QLabel("TMDB API Key"))
-        self.tmdb_key_edit = QLineEdit(str(config.get("tmdb_key") or ""))
-        self.tmdb_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self.tmdb_key_edit.setPlaceholderText("没有 Key 时 TMDB 会跳过")
-        key_row.addWidget(self.tmdb_key_edit, 1)
-        sites_layout.addLayout(key_row)
-        grid.addWidget(sites_card, 0, 1, 1, 1)
+        tpdb_row = QHBoxLayout()
+        tpdb_row.addWidget(QLabel("TPDB Token"))
+        self.tpdb_edit = QLineEdit()
+        self.tpdb_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.tpdb_edit.setPlaceholderText("可选；空则跳过（刮削器暂未接入）")
+        tpdb_row.addWidget(self.tpdb_edit, 1)
+        sites_layout.addLayout(tpdb_row)
+        grid.addWidget(sites_card, 2, 0)
+
+        # Naming
+        name_card, name_layout = self._card("命名规则（本类型）")
+        loc_row = QHBoxLayout()
+        loc_row.addWidget(QLabel("文件夹规则"))
+        self.location_edit = QLineEdit()
+        self.location_edit.setPlaceholderText("如 actor+'/'+number 或 genres+'/'+title")
+        loc_row.addWidget(self.location_edit, 1)
+        name_layout.addLayout(loc_row)
+        nam_row = QHBoxLayout()
+        nam_row.addWidget(QLabel("文件命名"))
+        self.naming_edit = QLineEdit()
+        self.naming_edit.setPlaceholderText("如 number+'-'+title 或 title.year")
+        nam_row.addWidget(self.naming_edit, 1)
+        name_layout.addLayout(nam_row)
+        max_row = QHBoxLayout()
+        max_row.addWidget(QLabel("标题最大长度"))
+        self.max_title_spin = QSpinBox()
+        self.max_title_spin.setRange(10, 200)
+        max_row.addWidget(self.max_title_spin)
+        self.uppercase_box = QCheckBox("番号大写")
+        max_row.addWidget(self.uppercase_box)
+        max_row.addStretch(1)
+        name_layout.addLayout(max_row)
+        del_row = QHBoxLayout()
+        del_row.addWidget(QLabel("标题删除字符"))
+        self.delete_chars_edit = QLineEdit()
+        self.delete_chars_edit.setPlaceholderText("这些字符会从命名结果中去掉")
+        del_row.addWidget(self.delete_chars_edit, 1)
+        name_layout.addLayout(del_row)
+        token_hint = QLabel("可用 token：actor / title / genres / number / year；用 + 与引号拼接，也支持 title.year。")
+        token_hint.setWordWrap(True)
+        token_hint.setStyleSheet("color: #888; font-size: 12px; border: none;")
+        name_layout.addWidget(token_hint)
+        grid.addWidget(name_card, 2, 1)
+
+        # Exclusion
+        excl_card, excl_layout = self._card("扫描排除（本类型）")
+        fold_row = QHBoxLayout()
+        fold_row.addWidget(QLabel("排除文件夹"))
+        self.excluded_folders_edit = QLineEdit()
+        self.excluded_folders_edit.setPlaceholderText("逗号分隔，如 failed,.actors,output")
+        fold_row.addWidget(self.excluded_folders_edit, 1)
+        excl_layout.addLayout(fold_row)
+        size_row = QHBoxLayout()
+        size_row.addWidget(QLabel("忽略小于（MB）"))
+        self.excluded_size_spin = QDoubleSpinBox()
+        self.excluded_size_spin.setRange(0, 10000)
+        self.excluded_size_spin.setDecimals(1)
+        size_row.addWidget(self.excluded_size_spin)
+        size_row.addWidget(QLabel("0=不按大小过滤"))
+        size_row.addStretch(1)
+        excl_layout.addLayout(size_row)
+        excl_layout.addStretch(1)
+        grid.addWidget(excl_card, 3, 0, 1, 2)
 
         grid.setColumnStretch(0, 1)
         grid.setColumnStretch(1, 1)
-        grid.setRowStretch(2, 1)
+        root.addStretch(1)
+
+        self._apply_mode_to_ui(self._film_type)
         return page
 
     def _build_custom_page(self) -> QWidget:
@@ -784,30 +922,119 @@ class MainWindow(QMainWindow):
                 "name": item.data(Qt.ItemDataRole.UserRole),
                 "enabled": item.checkState() == Qt.CheckState.Checked,
             })
-        return normalize_sites(sites)
+        return normalize_sites(sites, film_type=self._film_type)
 
     def _proxy_url(self) -> str:
         host = self.proxy_host.text().strip() or "localhost"
         port = self.proxy_port.text().strip() or "1080"
         return f"http://{host}:{port}"
 
+    def _sync_film_type_style(self) -> None:
+        on = "QPushButton { background: #2563EB; color: white; border: none; border-radius: 4px; padding: 8px 18px; }"
+        off = "QPushButton { background: white; color: #444; border: 1px solid #D0D0D0; border-radius: 4px; padding: 8px 18px; }"
+        self.general_film_btn.setStyleSheet(on if self.general_film_btn.isChecked() else off)
+        self.other_film_btn.setStyleSheet(on if self.other_film_btn.isChecked() else off)
+
+    def _on_film_type_toggled(self, checked: bool) -> None:
+        if not checked:
+            return
+        self._capture_mode_from_ui()
+        self._film_type = "general" if self.general_film_btn.isChecked() else "other"
+        self._apply_mode_to_ui(self._film_type)
+        self._sync_film_type_style()
+
+    def _fill_site_list(self, sites: list[dict]) -> None:
+        self.site_list.clear()
+        for item in normalize_sites(sites, film_type=self._film_type):
+            label = SITE_LABELS.get(item["name"], item["name"])
+            row_item = QListWidgetItem(label)
+            row_item.setData(Qt.ItemDataRole.UserRole, item["name"])
+            row_item.setFlags(row_item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            row_item.setCheckState(
+                Qt.CheckState.Checked if item["enabled"] else Qt.CheckState.Unchecked
+            )
+            self.site_list.addItem(row_item)
+
+    def _capture_mode_from_ui(self) -> None:
+        if not hasattr(self, "site_list"):
+            return
+        self._mode_cache[self._film_type] = {
+            "sites": self._sites(),
+            "skip_existing_nfo": self.skip_nfo_box.isChecked(),
+            "translate_plot": self.translate_box.isChecked(),
+            "download_images": self.download_images_box.isChecked(),
+            "download_missing_only": self.download_missing_box.isChecked(),
+            "sleep_seconds": float(self.sleep_spin.value()),
+            "print_nfo": self.print_nfo_box.isChecked(),
+            "nfo_skip_days": int(self.nfo_skip_spin.value()),
+            "excluded_folders": self.excluded_folders_edit.text().strip(),
+            "excluded_size_mb": float(self.excluded_size_spin.value()),
+            "location_rule": self.location_edit.text().strip(),
+            "naming_rule": self.naming_edit.text().strip(),
+            "max_title_len": int(self.max_title_spin.value()),
+            "delete_chars": self.delete_chars_edit.text(),
+            "uppercase_name": self.uppercase_box.isChecked(),
+            "jellyfin_mode": self.jellyfin_box.isChecked(),
+            "actor_photo_kodi": True,
+            "tpdb_token": self.tpdb_edit.text().strip(),
+            "extrafanart": self.extrafanart_box.isChecked(),
+            "trailer": self.trailer_box.isChecked(),
+            "storyline": self.storyline_box.isChecked(),
+        }
+
+    def _apply_mode_to_ui(self, film_type: str) -> None:
+        mode = dict(self._mode_cache.get(film_type) or {})
+        if not mode.get("sites"):
+            mode["sites"] = default_sites(film_type)
+        self._fill_site_list(mode.get("sites") or [])
+        self.skip_nfo_box.setChecked(bool(mode.get("skip_existing_nfo", True)))
+        self.translate_box.setChecked(bool(mode.get("translate_plot", film_type != "general")))
+        self.download_images_box.setChecked(bool(mode.get("download_images", True)))
+        self.download_missing_box.setChecked(bool(mode.get("download_missing_only", False)))
+        self.print_nfo_box.setChecked(bool(mode.get("print_nfo", True)))
+        self.extrafanart_box.setChecked(bool(mode.get("extrafanart", True)))
+        self.trailer_box.setChecked(bool(mode.get("trailer", False)))
+        self.storyline_box.setChecked(bool(mode.get("storyline", False)))
+        self.sleep_spin.setValue(float(mode.get("sleep_seconds") or 0.3))
+        self.nfo_skip_spin.setValue(int(mode.get("nfo_skip_days") or 0))
+        self.jellyfin_box.setChecked(bool(mode.get("jellyfin_mode", False)))
+        self.location_edit.setText(str(mode.get("location_rule") or (
+            "genres+'/'+title" if film_type == "general" else "actor+'/'+number"
+        )))
+        self.naming_edit.setText(str(mode.get("naming_rule") or (
+            "title.year" if film_type == "general" else "number+'-'+title"
+        )))
+        self.max_title_spin.setValue(int(mode.get("max_title_len") or 80))
+        self.delete_chars_edit.setText(str(mode.get("delete_chars") or ""))
+        self.uppercase_box.setChecked(bool(mode.get("uppercase_name", False)))
+        self.excluded_folders_edit.setText(str(mode.get("excluded_folders") or "failed,.actors"))
+        self.excluded_size_spin.setValue(float(mode.get("excluded_size_mb") or 0))
+        self.tpdb_edit.setText(str(mode.get("tpdb_token") or ""))
+        # TPDB more relevant for other; still visible for both
+        self.tpdb_edit.setEnabled(True)
+
     def _settings(self) -> dict:
+        self._capture_mode_from_ui()
+        film_type = "general" if self.general_film_btn.isChecked() else "other"
+        self._film_type = film_type
         return {
+            "film_type": film_type,
             "media_dir": self.media_edit.text().strip(),
             "output_dir": self.output_edit.text().strip(),
             "output_mode": "folder" if self.folder_radio.isChecked() else "beside",
-            "sites": self._sites(),
             "tmdb_key": self.tmdb_key_edit.text().strip(),
             "proxy": self._proxy_url(),
             "proxy_enabled": self.proxy_enabled.isChecked(),
-            "skip_existing_nfo": self.skip_nfo_box.isChecked(),
-            "translate_plot": self.translate_box.isChecked(),
             "emby_type": "jellyfin" if self.jelly_btn.isChecked() else "emby",
             "emby_url": self.emby_url_edit.text().strip(),
             "emby_api_key": self.emby_key_edit.text().strip(),
             "emby_user_id": self.emby_user_edit.text().strip(),
             "actor_avatar_source": "local" if self.local_avatar_radio.isChecked() else "gfriends",
             "actor_local_dir": self.actor_local_edit.text().strip(),
+            "general": dict(self._mode_cache.get("general") or {}),
+            "other": dict(self._mode_cache.get("other") or {}),
+            # Flatten active mode for scrape callers / CLI parity
+            **dict(self._mode_cache.get(film_type) or {}),
         }
 
     def _remember(self) -> None:
@@ -850,7 +1077,7 @@ class MainWindow(QMainWindow):
             self,
             "帮助",
             "本地电影元数据刮削。\n\n"
-            "1. 在「本地配置」设置刮削源目录、输出模式、网站优先级与代理。\n"
+            "1. 在「本地配置」选择一般影片/其他影片，再设目录、网站与命名规则。\n"
             "2. 点底部绿色「开始」批量刮削；日志在「运行」。\n"
             "3. 「自定义刮削」可只处理一个文件，或测试文件名解析。\n"
             "4. 「演员」可连接 Emby/Jellyfin 并补全缺失头像（Gfriends 或本地库）。\n"
