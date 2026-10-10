@@ -136,6 +136,60 @@ def scrape(
     log("全部完成")
 
 
+def scrape_one(
+    video: Path,
+    *,
+    mode: str,
+    output_dir: Path | None,
+    sources: dict | None = None,
+    stop_check: StopFn,
+    log: LogFn,
+    progress: ProgressFn | None = None,
+) -> None:
+    """Scrape a single video file with the same rules as ``scrape``."""
+
+    video = Path(video)
+    if not video.is_file():
+        log(f"文件不存在: {video}")
+        return
+    options = _options(True, sources)
+    if mode not in {"beside", "folder"}:
+        log(f"未知输出方式: {mode}")
+        return
+    if mode == "folder":
+        if output_dir is None or not str(output_dir).strip():
+            log("「按演员/标题改名并移动」需要选择输出目录")
+            return
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+    proxy_url, warning = classify_proxy(options["proxy"])
+    if warning:
+        log(warning)
+    options["proxy"] = proxy_url
+    order = enabled_names(options.get("sites"))
+    log("数据源顺序: " + (", ".join(_LABELS[name] for name in order) if order else "（无）"))
+    if progress:
+        progress(1, 1, video.name)
+    if stop_check():
+        log("已停止")
+        return
+    try:
+        _process_one(
+            video,
+            mode=mode,
+            output_dir=output_dir,
+            options=options,
+            log=log,
+        )
+    except Exception as exc:
+        log(f"处理失败 {video.name}: {exc}")
+    if stop_check():
+        log("已停止")
+        return
+    log("全部完成")
+
+
+
 def _options(use_imdb: bool, sources: dict | None) -> dict:
     if sources is None:
         sites = normalize_sites([

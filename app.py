@@ -11,7 +11,7 @@ import json
 import sys
 from pathlib import Path
 
-from scraper.organize import scrape
+from scraper.organize import scrape, scrape_one
 from scraper.sources import normalize_sites
 
 APP_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
@@ -24,8 +24,15 @@ DEFAULTS = {
     "sites": None,
     "tmdb_key": "",
     "proxy": "",
+    "proxy_enabled": False,
     "skip_existing_nfo": True,
     "translate_plot": True,
+    "emby_type": "emby",
+    "emby_url": "",
+    "emby_api_key": "",
+    "emby_user_id": "",
+    "actor_avatar_source": "gfriends",
+    "actor_local_dir": "",
 }
 
 
@@ -44,12 +51,16 @@ def load_config() -> dict:
         data["output_dir"] = raw["output_dir"]
     if raw.get("output_mode") in {"beside", "folder"}:
         data["output_mode"] = raw["output_mode"]
-    for key in ("skip_existing_nfo", "translate_plot"):
+    for key in ("skip_existing_nfo", "translate_plot", "proxy_enabled"):
         if isinstance(raw.get(key), bool):
             data[key] = raw[key]
-    for key in ("tmdb_key", "proxy"):
+    for key in ("tmdb_key", "proxy", "emby_url", "emby_api_key", "emby_user_id", "actor_local_dir"):
         if isinstance(raw.get(key), str):
             data[key] = raw[key]
+    if raw.get("emby_type") in {"emby", "jellyfin"}:
+        data["emby_type"] = raw["emby_type"]
+    if raw.get("actor_avatar_source") in {"gfriends", "local"}:
+        data["actor_avatar_source"] = raw["actor_avatar_source"]
     if isinstance(raw.get("sites"), list) and raw["sites"]:
         data["sites"] = normalize_sites(raw["sites"])
     else:
@@ -88,6 +99,12 @@ def save_config(data: dict) -> None:
         sites = normalize_sites(None, legacy or None, priority)
     else:
         sites = normalize_sites(sites)
+    emby_type = current.get("emby_type") if current.get("emby_type") in {"emby", "jellyfin"} else "emby"
+    avatar_source = (
+        current.get("actor_avatar_source")
+        if current.get("actor_avatar_source") in {"gfriends", "local"}
+        else "gfriends"
+    )
     payload = {
         "media_dir": str(current.get("media_dir") or ""),
         "output_dir": str(current.get("output_dir") or ""),
@@ -95,8 +112,15 @@ def save_config(data: dict) -> None:
         "sites": sites,
         "tmdb_key": str(current.get("tmdb_key") or ""),
         "proxy": str(current.get("proxy") or ""),
+        "proxy_enabled": bool(current.get("proxy_enabled", False)),
         "skip_existing_nfo": bool(current.get("skip_existing_nfo", True)),
         "translate_plot": bool(current.get("translate_plot", True)),
+        "emby_type": emby_type,
+        "emby_url": str(current.get("emby_url") or ""),
+        "emby_api_key": str(current.get("emby_api_key") or ""),
+        "emby_user_id": str(current.get("emby_user_id") or ""),
+        "actor_avatar_source": avatar_source,
+        "actor_local_dir": str(current.get("actor_local_dir") or ""),
     }
     CONFIG_PATH.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
@@ -104,16 +128,40 @@ def save_config(data: dict) -> None:
     )
 
 
+def effective_proxy(settings: dict) -> str:
+    if not settings.get("proxy_enabled", False):
+        return ""
+    return str(settings.get("proxy") or "").strip()
+
+
 def run_job(settings: dict, stop_check, log, progress) -> None:
     media = (settings.get("media_dir") or "").strip()
     mode = settings.get("output_mode") or "beside"
     output = (settings.get("output_dir") or "").strip()
+    payload = dict(settings)
+    payload["proxy"] = effective_proxy(settings)
     scrape(
         Path(media),
         mode=mode,
         output_dir=Path(output) if output else None,
         use_imdb=bool(settings.get("imdb", True)),
-        sources=settings,
+        sources=payload,
+        stop_check=stop_check,
+        log=log,
+        progress=progress,
+    )
+
+
+def run_one_file(settings: dict, video: Path, stop_check, log, progress) -> None:
+    mode = settings.get("output_mode") or "beside"
+    output = (settings.get("output_dir") or "").strip()
+    payload = dict(settings)
+    payload["proxy"] = effective_proxy(settings)
+    scrape_one(
+        Path(video),
+        mode=mode,
+        output_dir=Path(output) if output else None,
+        sources=payload,
         stop_check=stop_check,
         log=log,
         progress=progress,
@@ -192,6 +240,7 @@ def cli(argv: list[str]) -> int:
         "sites": sites,
         "tmdb_key": tmdb_key,
         "proxy": config.get("proxy") or "",
+        "proxy_enabled": bool(config.get("proxy_enabled", False)),
         "skip_existing_nfo": bool(config.get("skip_existing_nfo", True)),
         "translate_plot": bool(config.get("translate_plot", True)),
     }
