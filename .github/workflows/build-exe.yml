@@ -13,56 +13,49 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
+
       - name: Read VERSION
         id: ver
         shell: bash
         run: |
           VERSION=$(tr -d '[:space:]' < VERSION)
-          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9]+)?$ ]]; then
-            echo "VERSION 格式无效: '$VERSION'（需要如 0.2.0）"
+          echo "VERSION=$VERSION"
+          if ! echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9]+)?$'; then
+            echo "Invalid VERSION: $VERSION (expected like 0.2.0)"
             exit 1
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Building MovieScraper v$VERSION"
+
       - name: Install
         run: py -3 -m pip install -r requirements.txt pyinstaller
+
       - name: Build one file
         run: py -3 -m PyInstaller --noconsole --onefile --name MovieScraper --add-data "VERSION;." app.py
+
       - uses: actions/upload-artifact@v4
         with:
           name: MovieScraper-${{ steps.ver.outputs.tag }}
           path: dist/MovieScraper.exe
+
       - name: Publish versioned release and latest
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.ver.outputs.tag }}
           VERSION: ${{ steps.ver.outputs.version }}
+          REPO: ${{ github.repository }}
         shell: bash
         run: |
           set -euo pipefail
           if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "错误：Release $TAG 已存在。请先在 VERSION 里提高版本号再推送 master。"
+            echo "Error: release $TAG already exists. Bump VERSION before pushing master."
             exit 1
           fi
-          NOTES="MovieScraper ${TAG}
-
-自动由 master 构建的 Windows 单文件。
-
-- 版本化下载：https://github.com/${{ github.repository }}/releases/tag/${TAG}
-- 始终最新：https://github.com/${{ github.repository }}/releases/latest
-- 直接下载 latest exe：https://github.com/${{ github.repository }}/releases/download/latest/MovieScraper.exe"
-
-          gh release create "$TAG" dist/MovieScraper.exe \
-            --title "MovieScraper ${TAG}" \
-            --notes "$NOTES" \
-            --latest=false
-
+          NOTES="MovieScraper ${TAG} — Windows one-file build from master. Versioned: https://github.com/${REPO}/releases/tag/${TAG} — Latest exe: https://github.com/${REPO}/releases/download/latest/MovieScraper.exe"
+          gh release create "$TAG" dist/MovieScraper.exe --title "MovieScraper ${TAG}" --notes "$NOTES" --latest=false
           gh release delete latest --yes --cleanup-tag || true
-          gh release create latest dist/MovieScraper.exe \
-            --title "最新 Windows 单文件 (${TAG})" \
-            --notes "始终指向最新构建，当前对应正式版本 ${TAG}。" \
-            --latest
+          gh release create latest dist/MovieScraper.exe --title "Latest Windows exe (${TAG})" --notes "Floating latest build; corresponds to ${TAG}." --latest
